@@ -40,17 +40,17 @@ Intrinsics are derived from render resolution + camera vertical FOV:
 - `fl_y = (h/2) / tan(fov_v/2)`, `fl_x = fl_y`
 - `k1 = k2 = p1 = p2 = 0`
 
-## Coordinate conversion (PlayCanvas → OpenCV C2W) — IMPORTANT
+## Coordinate conversion (PlayCanvas → OpenGL/NeRF C2W) — IMPORTANT
 
-PlayCanvas / OpenGL camera convention: right-handed, **+Y up, camera looks −Z**. OpenCV convention: right-handed, **+Y down, camera looks +Z**. SuperSplat also applies a transform to the splat entity when loading a `.ply`. To produce a C2W matrix in the `.ply`'s native world frame:
+The `transform_matrix` uses the **OpenGL / NeRF camera-to-world convention**: right-handed, **+X right, +Y up, camera looks −Z**. This is *the same convention PlayCanvas cameras use*, so **no axis flip is applied**. (The top-level `camera_model: "OPENCV"` refers only to the intrinsics + distortion model — `fl_*`, `cx`, `cy`, `k1..p2` — **not** to the extrinsic axis convention. Do **not** right-multiply by `diag(1,−1,−1,1)`; doing so flips +Y/up and renders every view upside-down.)
+
+SuperSplat applies a transform to the splat entity when loading a `.ply`. To produce a C2W matrix in the `.ply`'s native world frame:
 
 1. Express the camera pose in the **splat/PLY frame** to cancel SuperSplat's load transform:
-   `M_camera_in_ply = inverse(splatEntity.worldTransform) · camera.worldTransform`
-2. Convert OpenGL camera axes to OpenCV by right-multiplying with `diag(1, -1, -1, 1)`:
-   `C2W_opencv = M_camera_in_ply · diag(1, -1, -1, 1)`
-3. Emit as a row-major 4×4 array with last row `[0, 0, 0, 1]`.
+   `C2W = inverse(splatEntity.worldTransform) · camera.worldTransform`
+2. Emit as a row-major 4×4 array with last row `[0, 0, 0, 1]`.
 
-**Validation:** `data/transforms.json` pairs with `data/export_last.ply` (its frames are the cameras that produced the splat). Placing a camera at one of those poses should render an upright, well-framed view — use this to confirm the conversion is correct (a mirrored/upside-down result means the conversion is wrong).
+**Validation:** `data/transforms.json` pairs with `data/export_last.ply` (its frames are the cameras that produced the splat). Placing a camera at one of those poses should render an upright, well-framed view — use this to confirm the conversion is correct (an upside-down result usually means an erroneous +Y flip was applied).
 
 ## Dev setup
 

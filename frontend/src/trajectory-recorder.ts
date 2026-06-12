@@ -27,15 +27,6 @@ type Sample = {
     fov: number;
 };
 
-// 4x4 diagonal(1,-1,-1,1): converts OpenGL/PlayCanvas camera axes (look -Z,
-// +Y up) to OpenCV camera axes (look +Z, +Y down). Right-multiplied onto C2W.
-const glToCvFlip = (() => {
-    const m = new Mat4();
-    m.data[5] = -1; // flip Y
-    m.data[10] = -1; // flip Z
-    return m;
-})();
-
 // resolve the backend base url (override with ?backend=...)
 const resolveBackend = () => {
     const param = new URLSearchParams(window.location.search.slice(1)).get('backend');
@@ -92,21 +83,24 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         });
     };
 
-    // --- coordinate conversion: PlayCanvas world -> OpenCV C2W rows --------
-    const toOpenCvC2W = (worldData: number[]): number[][] => {
+    // --- coordinate conversion: PlayCanvas world -> OpenGL/NeRF C2W rows ---
+    // The target transforms.json uses the OpenGL / NeRF camera-to-world
+    // convention (+X right, +Y up, camera looks -Z). PlayCanvas cameras already
+    // use exactly this convention, so no axis flip is applied here — we only
+    // re-express the pose in the splat's native (ply) frame. (camera_model
+    // "OPENCV" in the output refers to the intrinsics/distortion model only.)
+    const toOpenGlC2W = (worldData: number[]): number[][] => {
         const splats = scene.getElementsByType(ElementType.splat) as Splat[];
         const camWorld = new Mat4();
         camWorld.data.set(worldData);
 
-        let camInScene = camWorld;
+        let c2w = camWorld;
         if (splats.length > 0) {
             // express the pose in the splat's native (ply) frame, cancelling
             // whatever transform SuperSplat applied to the splat on load
             const invSplat = splats[0].worldTransform.clone().invert();
-            camInScene = new Mat4().mul2(invSplat, camWorld);
+            c2w = new Mat4().mul2(invSplat, camWorld);
         }
-
-        const c2w = new Mat4().mul2(camInScene, glToCvFlip);
 
         // playcanvas Mat4.data is column-major; emit row-major rows
         const d = c2w.data;
@@ -151,7 +145,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         // session id derived from sample count + a clock-free counter is not
         // available; use the page performance origin time, which is monotonic
         const session = `rec_${Math.round(performance.now())}`;
-        const frames: { file_path: string; transform_matrix: number[][] }[] = [];
+        const frames: { transform_matrix: number[][] }[] = [];
 
         for (let i = 0; i < samples.length; i++) {
             const s = samples[i];
@@ -166,14 +160,13 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             const png = await compressor.compress(new Uint32Array(rgba.buffer), width, height);
 
             const index = i + 1;
-            const filePath = `images/frame_${String(index).padStart(5, '0')}.png`;
 
             const form = new FormData();
             form.append('index', String(index));
             form.append('image', new Blob([png], { type: 'image/png' }), `frame_${String(index).padStart(5, '0')}.png`);
             await fetch(`${backend}/api/recordings/${session}/frame`, { method: 'POST', body: form });
 
-            frames.push({ file_path: filePath, transform_matrix: toOpenCvC2W(s.world) });
+            frames.push({ transform_matrix: toOpenGlC2W(s.world) });
         }
 
         const transforms = { ...intrinsics(samples[0].fov), frames };
