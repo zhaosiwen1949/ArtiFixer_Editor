@@ -1,0 +1,21 @@
+@use 'colors.scss' as *;
+
+.tooltips {
+    position: absolute;
+    background-color: $bcg-darkest;
+    border: 1px solid $bcg-primary;
+    padding: 4px;
+    box-sizing: border-box;
+}
+
+.tooltips-content {
+    display: block;
+    box-sizing: border-box;
+    max-width: min(260px, calc(100vw - 24px));
+    white-space: normal;
+    overflow-wrap: break-word;
+    word-wrap: break-word;
+
+    color: $clr-default;
+    margin: 0;
+}
