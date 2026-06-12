@@ -42,6 +42,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
     let fps = 30;
     let width = 960;
     let height = 540;
+    let dedupe = false; // when true, drop consecutive duplicate (stationary) poses on save
 
     // --- playback state ----------------------------------------------------
     let playing = false;
@@ -53,6 +54,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
     let toggleBtn: HTMLButtonElement;
     let fpsInput: HTMLInputElement;
     let resInput: HTMLInputElement;
+    let dedupeInput: HTMLInputElement;
     let sessionSelect: HTMLSelectElement;
     let refreshBtn: HTMLButtonElement;
     let playBtn: HTMLButtonElement;
@@ -72,6 +74,9 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         toggleBtn.disabled = playing;
         fpsInput.disabled = recording;
         resInput.disabled = recording || playing;
+        if (dedupeInput) {
+            dedupeInput.disabled = recording || playing;
+        }
 
         if (playBtn) {
             playBtn.textContent = playing ? '■ Stop' : '▶ Play';
@@ -187,9 +192,33 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         const session = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
             `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 
-        const frames = samples.map(s => ({ transform_matrix: toOpenGlC2W(s.world) }));
+        // optionally drop consecutive duplicate (stationary) poses
+        let kept = samples;
+        if (dedupe) {
+            const eps = 1e-6;
+            const sameWorld = (a: number[], b: number[]) => {
+                for (let i = 0; i < 16; i++) {
+                    if (Math.abs(a[i] - b[i]) > eps) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            kept = [];
+            let prev: number[] | null = null;
+            for (const s of samples) {
+                if (prev && sameWorld(prev, s.world)) {
+                    continue;
+                }
+                kept.push(s);
+                prev = s.world;
+            }
+        }
 
-        const transforms = { ...intrinsics(samples[0].fov), frames };
+        const frames = kept.map(s => ({ transform_matrix: toOpenGlC2W(s.world) }));
+        const removed = samples.length - kept.length;
+
+        const transforms = { ...intrinsics(kept[0].fov), frames };
         setStatus('saving transforms.json');
         await fetch(`${backend}/api/recordings/${session}/finalize`, {
             method: 'POST',
@@ -197,7 +226,8 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             body: JSON.stringify(transforms)
         });
 
-        setStatus(`saved ${frames.length} poses → output/${session}`);
+        const dupNote = dedupe ? ` (removed ${removed} duplicate)` : '';
+        setStatus(`saved ${frames.length} poses${dupNote} → output/${session}`);
     };
 
     // --- playback ----------------------------------------------------------
@@ -391,6 +421,22 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             }
         });
         panel.appendChild(row('Resolution', resInput));
+
+        dedupeInput = document.createElement('input');
+        dedupeInput.type = 'checkbox';
+        dedupeInput.checked = dedupe;
+        dedupeInput.style.cssText = 'margin:0;cursor:pointer';
+        dedupeInput.addEventListener('change', () => {
+            dedupe = dedupeInput.checked;
+        });
+        const dedupeRow = document.createElement('label');
+        dedupeRow.title = 'Drop consecutive identical (stationary) camera poses when saving';
+        dedupeRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer';
+        dedupeRow.appendChild(dedupeInput);
+        const dedupeSpan = document.createElement('span');
+        dedupeSpan.textContent = 'Remove duplicate poses';
+        dedupeRow.appendChild(dedupeSpan);
+        panel.appendChild(dedupeRow);
 
         toggleBtn = document.createElement('button');
         toggleBtn.title = 'Shortcut: Shift+R';
