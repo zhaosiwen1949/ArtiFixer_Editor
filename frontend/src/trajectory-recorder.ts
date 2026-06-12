@@ -2,18 +2,16 @@ import { Mat4, Vec3 } from 'playcanvas';
 
 import { ElementType } from './element';
 import { Events } from './events';
-import { PngCompressor } from './png-compressor';
 import { Scene } from './scene';
 import { Splat } from './splat';
 
 // ---------------------------------------------------------------------------
 // Camera trajectory recorder + playback
 //
-// Recording: camera poses are sampled at a fixed rate during free navigation
-// (only poses are stored, so motion stays smooth). On stop, every sampled pose
-// is re-rendered offscreen to a PNG at the configured resolution and uploaded
-// to the FastAPI backend together with a transforms.json that matches the
-// reference OpenGL/NeRF C2W format (see CLAUDE.md).
+// Recording: camera poses are sampled at a fixed rate during free navigation.
+// On stop, the sampled poses are written to the FastAPI backend as a
+// transforms.json that matches the reference OpenGL/NeRF C2W format (see
+// CLAUDE.md). Only camera poses are saved — no screenshots.
 //
 // Playback: a previously saved trajectory can be selected and replayed in the
 // editor. Each stored C2W matrix is converted back to a PlayCanvas camera pose
@@ -24,11 +22,7 @@ import { Splat } from './splat';
 type Sample = {
     // PlayCanvas world transform of the camera at sample time (column-major data)
     world: number[];
-    // orbit state used to faithfully reproduce the pose when re-rendering
-    azim: number;
-    elev: number;
-    distance: number;
-    focal: { x: number; y: number; z: number };
+    // vertical FOV at sample time, used to derive intrinsics
     fov: number;
 };
 
@@ -48,8 +42,6 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
     let fps = 30;
     let width = 960;
     let height = 540;
-
-    let compressor: PngCompressor | null = null;
 
     // --- playback state ----------------------------------------------------
     let playing = false;
@@ -94,13 +86,6 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
     const takeSample = () => {
         samples.push({
             world: Array.from(camera.worldTransform.data),
-            azim: camera.azim,
-            elev: camera.elevation,
-            distance: camera.distance,
-            focal: (() => {
-                const f = camera.focalPoint;
-                return { x: f.x, y: f.y, z: f.z };
-            })(),
             fov: camera.fov
         });
     };
@@ -189,14 +174,11 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         };
     };
 
-    // --- render every sample, upload --------------------------------------
+    // --- save the recorded poses (no screenshots) -------------------------
     const exportSamples = async () => {
         if (samples.length === 0) {
-            setStatus('no frames recorded');
+            setStatus('no poses recorded');
             return;
-        }
-        if (!compressor) {
-            compressor = new PngCompressor();
         }
 
         // session id = folder creation timestamp (local time), YYYYMMDD_HHMMSS
@@ -204,29 +186,8 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         const pad = (n: number) => String(n).padStart(2, '0');
         const session = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
             `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        const frames: { transform_matrix: number[][] }[] = [];
 
-        for (let i = 0; i < samples.length; i++) {
-            const s = samples[i];
-            setStatus(`rendering ${i + 1}/${samples.length}`);
-
-            // reproduce the pose exactly (damping 0 = snap)
-            camera.setFocalPoint(new Vec3(s.focal.x, s.focal.y, s.focal.z), 0);
-            camera.setAzimElev(s.azim, s.elev, 0);
-            camera.setDistance(s.distance, 0);
-
-            const rgba = await events.invoke('render.offscreen', width, height) as Uint8Array;
-            const png = await compressor.compress(new Uint32Array(rgba.buffer), width, height);
-
-            const index = i + 1;
-
-            const form = new FormData();
-            form.append('index', String(index));
-            form.append('image', new Blob([png], { type: 'image/png' }), `frame_${String(index).padStart(5, '0')}.png`);
-            await fetch(`${backend}/api/recordings/${session}/frame`, { method: 'POST', body: form });
-
-            frames.push({ transform_matrix: toOpenGlC2W(s.world) });
-        }
+        const frames = samples.map(s => ({ transform_matrix: toOpenGlC2W(s.world) }));
 
         const transforms = { ...intrinsics(samples[0].fov), frames };
         setStatus('saving transforms.json');
@@ -236,7 +197,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             body: JSON.stringify(transforms)
         });
 
-        setStatus(`saved ${frames.length} frames → output/${session}`);
+        setStatus(`saved ${frames.length} poses → output/${session}`);
     };
 
     // --- playback ----------------------------------------------------------
