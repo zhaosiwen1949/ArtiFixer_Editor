@@ -7,13 +7,18 @@ import { Scene } from './scene';
 import { Splat } from './splat';
 
 // ---------------------------------------------------------------------------
-// Camera trajectory recorder
+// Camera trajectory recorder + playback
 //
-// While recording, camera poses are sampled at a fixed rate during free
-// navigation (only poses are stored, so motion stays smooth). On stop, every
-// sampled pose is re-rendered offscreen to a PNG at the configured resolution
-// and uploaded to the FastAPI backend together with a transforms.json that
-// matches the reference OpenCV C2W format (see CLAUDE.md).
+// Recording: camera poses are sampled at a fixed rate during free navigation
+// (only poses are stored, so motion stays smooth). On stop, every sampled pose
+// is re-rendered offscreen to a PNG at the configured resolution and uploaded
+// to the FastAPI backend together with a transforms.json that matches the
+// reference OpenGL/NeRF C2W format (see CLAUDE.md).
+//
+// Playback: a previously saved trajectory can be selected and replayed in the
+// editor. Each stored C2W matrix is converted back to a PlayCanvas camera pose
+// and the camera is driven through the frames over time (at the panel FPS),
+// interpolating between consecutive poses for smooth motion.
 // ---------------------------------------------------------------------------
 
 type Sample = {
@@ -46,11 +51,19 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
 
     let compressor: PngCompressor | null = null;
 
+    // --- playback state ----------------------------------------------------
+    let playing = false;
+    let playPoses: { position: Vec3; target: Vec3 }[] = [];
+    let playHead = 0; // continuous frame index advanced by dt * fps
+
     // --- UI handles + helpers (declared early; assigned in buildUI) --------
     let statusEl: HTMLElement;
     let toggleBtn: HTMLButtonElement;
     let fpsInput: HTMLInputElement;
     let resInput: HTMLInputElement;
+    let sessionSelect: HTMLSelectElement;
+    let refreshBtn: HTMLButtonElement;
+    let playBtn: HTMLButtonElement;
 
     const setStatus = (text: string) => {
         if (statusEl) {
@@ -64,8 +77,17 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         }
         toggleBtn.textContent = recording ? '■ Stop' : '● Record';
         toggleBtn.style.background = recording ? '#c0392b' : '#2d8cf0';
+        toggleBtn.disabled = playing;
         fpsInput.disabled = recording;
-        resInput.disabled = recording;
+        resInput.disabled = recording || playing;
+
+        if (playBtn) {
+            playBtn.textContent = playing ? '■ Stop' : '▶ Play';
+            playBtn.style.background = playing ? '#c0392b' : '#27ae60';
+            playBtn.disabled = recording;
+            sessionSelect.disabled = recording || playing;
+            refreshBtn.disabled = recording || playing;
+        }
     };
 
     // --- pose sampling -----------------------------------------------------
@@ -109,6 +131,41 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             rows.push([d[r], d[4 + r], d[8 + r], d[12 + r]]);
         }
         return rows;
+    };
+
+    // --- inverse conversion: OpenGL/NeRF C2W rows -> camera position+target -
+    // Reverses toOpenGlC2W: re-apply the splat's load transform to bring the
+    // pose back into PlayCanvas world space, then extract the camera position
+    // (translation) and a look-at target along the camera's local -Z (forward).
+    const c2wRowsToPose = (rows: number[][]): { position: Vec3; target: Vec3 } => {
+        const splats = scene.getElementsByType(ElementType.splat) as Splat[];
+
+        // rebuild a column-major Mat4 from the row-major rows
+        const c2w = new Mat4();
+        const cd = c2w.data;
+        for (let r = 0; r < 4; r++) {
+            for (let c = 0; c < 4; c++) {
+                cd[c * 4 + r] = rows[r][c];
+            }
+        }
+
+        let camWorld = c2w;
+        if (splats.length > 0) {
+            camWorld = new Mat4().mul2(splats[0].worldTransform, c2w);
+        }
+
+        const m = camWorld.data;
+        const position = new Vec3(m[12], m[13], m[14]);
+        // camera looks down its local -Z; column 2 is the camera's +Z (backward)
+        const fwd = new Vec3(-m[8], -m[9], -m[10]).normalize();
+        // pick a target distance that normalizes to 1 (avoids the zoom clamp)
+        const dist = camera.sceneRadius / camera.fovFactor;
+        const target = new Vec3(
+            position.x + fwd.x * dist,
+            position.y + fwd.y * dist,
+            position.z + fwd.z * dist
+        );
+        return { position, target };
     };
 
     // --- intrinsics from fov + resolution (square pixels, centered) -------
@@ -182,6 +239,107 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         setStatus(`saved ${frames.length} frames → output/${session}`);
     };
 
+    // --- playback ----------------------------------------------------------
+    const populateSessions = (sessions: { session: string; frames: number }[]) => {
+        sessionSelect.innerHTML = '';
+        if (sessions.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '(no recordings)';
+            sessionSelect.appendChild(opt);
+            return;
+        }
+        for (const s of sessions) {
+            const opt = document.createElement('option');
+            opt.value = s.session;
+            opt.textContent = `${s.session} (${s.frames})`;
+            sessionSelect.appendChild(opt);
+        }
+        // default to the most recent (last, since names sort chronologically)
+        sessionSelect.value = sessions[sessions.length - 1].session;
+    };
+
+    const refreshSessions = async () => {
+        try {
+            const res = await fetch(`${backend}/api/recordings`);
+            const data = await res.json();
+            populateSessions(data.sessions ?? []);
+        } catch (e) {
+            setStatus('failed to list recordings');
+        }
+    };
+
+    const stopPlayback = () => {
+        if (!playing) {
+            return;
+        }
+        playing = false;
+        updateUI();
+    };
+
+    const startPlayback = async () => {
+        if (playing || recording) {
+            return;
+        }
+        const session = sessionSelect.value;
+        if (!session) {
+            setStatus('no trajectory selected');
+            return;
+        }
+        setStatus(`loading ${session}…`);
+        try {
+            const res = await fetch(`${backend}/api/recordings/${session}/transforms`);
+            if (!res.ok) {
+                setStatus('failed to load trajectory');
+                return;
+            }
+            const data = await res.json();
+            const frames = (data.frames ?? []) as { transform_matrix: number[][] }[];
+            if (frames.length === 0) {
+                setStatus('trajectory has no frames');
+                return;
+            }
+            playPoses = frames.map(f => c2wRowsToPose(f.transform_matrix));
+        } catch (e) {
+            setStatus('failed to load trajectory');
+            return;
+        }
+        playHead = 0;
+        playing = true;
+        updateUI();
+        setStatus(`playing ${session} (${playPoses.length} frames)`);
+    };
+
+    // advance playback each frame; interpolate between consecutive poses
+    events.on('update', (dt: number) => {
+        if (!playing || playPoses.length === 0) {
+            return;
+        }
+        const last = playPoses.length - 1;
+        playHead += dt * fps;
+
+        if (playHead >= last) {
+            const end = playPoses[last];
+            camera.setPose(end.position, end.target, 0);
+            scene.forceRender = true;
+            setStatus('playback finished');
+            stopPlayback();
+            return;
+        }
+
+        const i = Math.floor(playHead);
+        const frac = playHead - i;
+        const a = playPoses[i];
+        const b = playPoses[i + 1];
+        const lerp = (u: Vec3, v: Vec3) => new Vec3(
+            u.x + (v.x - u.x) * frac,
+            u.y + (v.y - u.y) * frac,
+            u.z + (v.z - u.z) * frac
+        );
+        camera.setPose(lerp(a.position, b.position), lerp(a.target, b.target), 0);
+        scene.forceRender = true;
+    });
+
     // --- public events -----------------------------------------------------
     events.function('trajectory.recording', () => recording);
 
@@ -208,6 +366,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         }
         updateUI();
         await exportSamples();
+        await refreshSessions();
         updateUI();
     });
 
@@ -270,6 +429,45 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         });
         panel.appendChild(toggleBtn);
 
+        // --- playback section ---
+        const divider = document.createElement('div');
+        divider.style.cssText = 'border-top:1px solid #444;margin:10px 0 8px';
+        panel.appendChild(divider);
+
+        const pbTitle = document.createElement('div');
+        pbTitle.textContent = 'Playback';
+        pbTitle.style.cssText = 'font-weight:600;margin-bottom:6px';
+        panel.appendChild(pbTitle);
+
+        sessionSelect = document.createElement('select');
+        sessionSelect.style.cssText = 'width:100%;background:#333;color:#fff;border:1px solid #555;border-radius:4px;padding:3px 4px;margin-bottom:6px';
+        panel.appendChild(sessionSelect);
+
+        const pbRow = document.createElement('div');
+        pbRow.style.cssText = 'display:flex;gap:6px';
+
+        refreshBtn = document.createElement('button');
+        refreshBtn.textContent = '⟳';
+        refreshBtn.title = 'Refresh list';
+        refreshBtn.style.cssText = 'flex:0 0 auto;border:none;color:#fff;background:#555;padding:6px 10px;border-radius:4px;cursor:pointer';
+        refreshBtn.addEventListener('click', () => {
+            refreshSessions();
+        });
+        pbRow.appendChild(refreshBtn);
+
+        playBtn = document.createElement('button');
+        playBtn.style.cssText = 'flex:1 1 auto;border:none;color:#fff;padding:6px;border-radius:4px;cursor:pointer';
+        playBtn.addEventListener('click', () => {
+            if (playing) {
+                stopPlayback();
+                setStatus('playback stopped');
+            } else {
+                startPlayback();
+            }
+        });
+        pbRow.appendChild(playBtn);
+        panel.appendChild(pbRow);
+
         statusEl = document.createElement('div');
         statusEl.style.cssText = 'margin-top:8px;opacity:0.8;min-height:16px';
         panel.appendChild(statusEl);
@@ -277,6 +475,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         document.body.appendChild(panel);
         updateUI();
         setStatus('idle');
+        refreshSessions();
     };
 
     buildUI();

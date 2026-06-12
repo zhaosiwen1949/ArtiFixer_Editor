@@ -118,6 +118,44 @@ async def finalize(session: str, transforms: dict):
 
 
 # ---------------------------------------------------------------------------
+# Trajectory playback (listing + fetch)
+# ---------------------------------------------------------------------------
+@app.get("/api/recordings")
+def list_recordings():
+    """List saved recording sessions (those that contain a transforms.json),
+    sorted by name (timestamp-named folders sort chronologically)."""
+    if not OUTPUT_DIR.exists():
+        return {"sessions": []}
+
+    sessions = []
+    for d in sorted(OUTPUT_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        tj = d / "transforms.json"
+        if not tj.exists():
+            continue
+        try:
+            with tj.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            n_frames = len(data.get("frames", []))
+        except (json.JSONDecodeError, OSError):
+            n_frames = 0
+        sessions.append({"session": d.name, "frames": n_frames})
+
+    return {"sessions": sessions}
+
+
+@app.get("/api/recordings/{session}/transforms")
+def get_transforms(session: str):
+    """Return a saved session's transforms.json (for playback in the editor)."""
+    _safe(session, "session")
+    path = OUTPUT_DIR / session / "transforms.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"transforms not found: {session}")
+    return FileResponse(path, media_type="application/json")
+
+
+# ---------------------------------------------------------------------------
 # Static frontend (production build). Mounted last so /api/* takes precedence.
 # In dev, run the frontend with `npm run develop` instead.
 # ---------------------------------------------------------------------------
