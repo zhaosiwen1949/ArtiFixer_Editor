@@ -50,6 +50,9 @@ const defaultShortcuts: Record<string, ShortcutBinding> = {
     'tool.deactivate': { keys: ['Escape'] },
     'tool.toggleCoordSpace': { keys: ['c'], shift: 'required' },
 
+    // Trajectory recording (toggle start/stop)
+    'trajectory.toggle': { keys: ['r'], shift: 'required' },
+
     // Other
     'edit.undo': { keys: ['z'], ctrl: 'required', repeat: true, capture: true },
     'edit.redo': { keys: ['z'], ctrl: 'required', shift: 'required', repeat: true, capture: true },

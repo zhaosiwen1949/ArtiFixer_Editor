@@ -304,6 +304,19 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
     // --- public events -----------------------------------------------------
     events.function('trajectory.recording', () => recording);
 
+    // Shift+R toggles recording (start on first press, stop on next). Ignored
+    // while a saved trajectory is playing back.
+    events.on('trajectory.toggle', () => {
+        if (playing) {
+            return;
+        }
+        if (recording) {
+            events.invoke('trajectory.stop');
+        } else {
+            events.invoke('trajectory.start');
+        }
+    });
+
     events.function('trajectory.start', () => {
         if (recording) {
             return;
@@ -380,6 +393,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         panel.appendChild(row('Resolution', resInput));
 
         toggleBtn = document.createElement('button');
+        toggleBtn.title = 'Shortcut: Shift+R';
         toggleBtn.style.cssText = 'width:100%;border:none;color:#fff;padding:6px;border-radius:4px;cursor:pointer;margin-top:2px';
         toggleBtn.addEventListener('click', () => {
             if (recording) {
