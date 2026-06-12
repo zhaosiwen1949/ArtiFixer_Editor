@@ -142,9 +142,11 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             compressor = new PngCompressor();
         }
 
-        // session id derived from sample count + a clock-free counter is not
-        // available; use the page performance origin time, which is monotonic
-        const session = `rec_${Math.round(performance.now())}`;
+        // session id = folder creation timestamp (local time), YYYYMMDD_HHMMSS
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const session = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
+            `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
         const frames: { transform_matrix: number[][] }[] = [];
 
         for (let i = 0; i < samples.length; i++) {
