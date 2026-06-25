@@ -1,0 +1,13 @@
+{
+  "name": "realsee-model-extractor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless-browser extractor: load a Realsee work with its own @realsee/five runtime, grab the decoded THREE.js mesh, export OBJ+MTL.",
+  "scripts": {
+    "extract": "node extract.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.47.0"
+  }
+}

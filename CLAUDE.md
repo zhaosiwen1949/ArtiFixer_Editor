@@ -58,6 +58,29 @@ SuperSplat applies a transform to the splat entity when loading a `.ply`. To pro
 
 **Validation:** `data/transforms.json` pairs with `data/export_last.ply` (its frames are the cameras that produced the splat). Placing a camera at one of those poses should render an upright, well-framed view — use this to confirm the conversion is correct (an upside-down result usually means an erroneous +Y flip was applied).
 
+## Tools (`tools/`) — Realsee scene extraction
+
+Standalone scripts that pull assets out of a Realsee (如视 / 贝壳VR) web tour
+(panoramas, camera poses, and the textured 3D model). They are independent of the
+viewer/backend; each has a sibling `.md` with full details. Default work URL and
+output dirs point at the project's reference scene (`data/` is gitignored).
+
+| Tool | Purpose | Key output | Details |
+|---|---|---|---|
+| `fetch_realsee_panoramas.py` | Download cube-map panoramas (6 faces/point) + emit per-face pinhole `transforms.json` from embedded `observers` poses | `data/panoramas/{point_XX/, images/, transforms.json, observers_raw.json}` | [doc](tools/fetch_realsee_panoramas.md) |
+| `build_panoramas.py` | Stitch the cube faces into equirectangular panoramas + per-point spherical-camera extrinsics | `data/panoramas/{pano/, pano_camera.json}` | [doc](tools/build_panoramas.md) |
+| `fetch_realsee_model.py` | Download the textured 3D model: proprietary `.at3d` mesh + texture atlases + manifest | `data/model/{model/*.at3d, materials/, model.json}` | [doc](tools/fetch_realsee_model.md) |
+| `model-extractor/` (Node) | Load the work in headless Chromium, let `@realsee/five` decode the `.at3d`, export standard **OBJ+MTL** | `data/model/exported/{model.obj, model.mtl, materials/, preview.png}` | [README](tools/model-extractor/README.md) |
+
+Pipelines (run in order):
+- **Panoramas + poses:** `fetch_realsee_panoramas.py` → `build_panoramas.py`.
+- **3D mesh:** `fetch_realsee_model.py` (raw `.at3d` + textures) → `model-extractor/` (decode `.at3d` to OBJ; binds `materialIndex i → texture_i.jpg`).
+
+Convention notes that bite: Realsee's viewer shares the OpenGL/NeRF camera frame
+(no axis flip → `transform_matrix`); panorama `up` is **negated** for
+`transforms.json` (180° roll) but the equirect stitcher uses a separate upright
+`up = +Y` basis — see the per-tool docs before changing any face/quaternion math.
+
 ## Dev setup
 
-Python uses **conda** (see `README.md` for exact commands). Frontend uses Node 20+ with `npm run develop` (Rollup dev server on `localhost:3000`). Backend runs via `uvicorn`.
+Python uses **conda** (see `README.md` for exact commands). Frontend uses Node 20+ with `npm run develop` (Rollup dev server on `localhost:3000`). Backend runs via `uvicorn`. The `tools/model-extractor/` Node tool has its own `npm install` + `npx playwright install chromium` (see its README).
