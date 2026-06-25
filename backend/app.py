@@ -84,21 +84,35 @@ def get_scene(name: str):
 # Trajectory upload
 # ---------------------------------------------------------------------------
 @app.post("/api/recordings/{session}/frame")
-async def upload_frame(session: str, index: int = Form(...), image: UploadFile = File(...)):
-    """Receive one rendered screenshot for a recording session.
+async def upload_frame(
+    session: str,
+    index: int = Form(...),
+    image: UploadFile = File(...),
+    opacity: UploadFile | None = File(None),
+):
+    """Receive one rendered frame for a recording session.
 
     Saved as data/output/<session>/images/frame_NNNNN.png (1-based, 5 digits).
+    If an opacity map is included, it is saved alongside as
+    data/output/<session>/opacity/frame_NNNNN.png.
     """
     _safe(session, "session")
+    filename = f"frame_{index:05d}.png"
+
     images_dir = OUTPUT_DIR / session / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"frame_{index:05d}.png"
-    dest = images_dir / filename
-    with dest.open("wb") as f:
+    with (images_dir / filename).open("wb") as f:
         f.write(await image.read())
 
-    return {"saved": f"images/{filename}"}
+    saved = {"image": f"images/{filename}"}
+    if opacity is not None:
+        opacity_dir = OUTPUT_DIR / session / "opacity"
+        opacity_dir.mkdir(parents=True, exist_ok=True)
+        with (opacity_dir / filename).open("wb") as f:
+            f.write(await opacity.read())
+        saved["opacity"] = f"opacity/{filename}"
+
+    return {"saved": saved}
 
 
 @app.post("/api/recordings/{session}/finalize")

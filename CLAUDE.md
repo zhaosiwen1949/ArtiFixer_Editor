@@ -16,7 +16,7 @@ A tool to **view 3D Gaussian Splatting (3DGS) `.ply` scenes in the browser and r
 
 Real-time continuous recording. The user free-navigates the scene, clicks **Start** (or presses **Shift+R**), navigates, then **Stop** (**Shift+R** again toggles it off):
 - While recording, camera poses are sampled at a fixed rate (**default 30 fps**) — only poses are stored.
-- On **Stop**, the sampled poses are written to the backend as a `transforms.json` (poses only — **no screenshots are rendered or saved**). The session folder is named with the local creation timestamp, `YYYYMMDD_HHMMSS`. The configured resolution (**default 960×540**) only drives the intrinsics (`w`, `h`, `fl_x`, `fl_y`, `cx`, `cy`) in `transforms.json`.
+- On **Stop**, each sampled pose is re-rendered offscreen at the configured resolution (**default 960×540**) and uploaded to the backend, then a `transforms.json` is written. Per pose, **two PNGs** are saved: the RGB screenshot under `images/frame_NNNNN.png` and a **grayscale opacity map** (the render's alpha channel = splat coverage) under `opacity/frame_NNNNN.png`. The PNGs are matched to frames by their `images/frame_NNNNN.png` ordering — `transforms.json` `frames[i]` carries only `transform_matrix` (no `file_path`/`mask_path`). The session folder is named with the local creation timestamp, `YYYYMMDD_HHMMSS`. The resolution also drives the intrinsics (`w`, `h`, `fl_x`, `fl_y`, `cx`, `cy`).
 
 ## Playback workflow
 

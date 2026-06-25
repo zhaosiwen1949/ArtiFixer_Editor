@@ -2,16 +2,20 @@ import { Mat4, Vec3 } from 'playcanvas';
 
 import { ElementType } from './element';
 import { Events } from './events';
+import { PngCompressor } from './png-compressor';
 import { Scene } from './scene';
 import { Splat } from './splat';
 
 // ---------------------------------------------------------------------------
 // Camera trajectory recorder + playback
 //
-// Recording: camera poses are sampled at a fixed rate during free navigation.
-// On stop, the sampled poses are written to the FastAPI backend as a
-// transforms.json that matches the reference OpenGL/NeRF C2W format (see
-// CLAUDE.md). Only camera poses are saved — no screenshots.
+// Recording: camera poses are sampled at a fixed rate during free navigation
+// (only poses are stored, so motion stays smooth). On stop, every sampled pose
+// is re-rendered offscreen at the configured resolution and uploaded to the
+// FastAPI backend as two PNGs per frame — the RGB screenshot (images/) and a
+// grayscale opacity map built from the render's alpha channel (opacity/) —
+// together with a transforms.json that matches the reference OpenGL/NeRF C2W
+// format (see CLAUDE.md).
 //
 // Playback: a previously saved trajectory can be selected and replayed in the
 // editor. Each stored C2W matrix is converted back to a PlayCanvas camera pose
@@ -43,6 +47,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
     let width = 960;
     let height = 540;
     let dedupe = false; // when true, drop consecutive duplicate (stationary) poses on save
+    let compressor: PngCompressor | null = null;
 
     // --- playback state ----------------------------------------------------
     let playing = false;
@@ -158,6 +163,22 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         return { position, target };
     };
 
+    // --- PlayCanvas world transform -> camera position + look-at target ---
+    // Used at export time to drive the camera back to each sampled pose before
+    // re-rendering. world is column-major; column 3 is the translation and the
+    // camera looks down its local -Z (the negated column 2).
+    const worldToPose = (world: number[]): { position: Vec3; target: Vec3 } => {
+        const position = new Vec3(world[12], world[13], world[14]);
+        const fwd = new Vec3(-world[8], -world[9], -world[10]).normalize();
+        const dist = camera.sceneRadius / camera.fovFactor;
+        const target = new Vec3(
+            position.x + fwd.x * dist,
+            position.y + fwd.y * dist,
+            position.z + fwd.z * dist
+        );
+        return { position, target };
+    };
+
     // --- intrinsics from fov + resolution (square pixels, centered) -------
     const intrinsics = (fovDeg: number) => {
         // offscreen render sets horizontalFov = width > height, so fov applies
@@ -179,11 +200,31 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         };
     };
 
-    // --- save the recorded poses (no screenshots) -------------------------
+    // --- build a grayscale opacity PNG from a render's alpha channel -------
+    // The offscreen render returns RGBA over a transparent background, so the
+    // alpha channel is exactly the splat coverage / opacity. Replicate alpha
+    // into RGB (A = 255) and run it through the same compressor as the RGB
+    // screenshot, so both PNGs share identical orientation handling.
+    const opacityPng = (rgba: Uint8Array, w: number, h: number) => {
+        const gray = new Uint8Array(w * h * 4);
+        for (let i = 0; i < w * h; i++) {
+            const a = rgba[i * 4 + 3];
+            gray[i * 4] = a;
+            gray[i * 4 + 1] = a;
+            gray[i * 4 + 2] = a;
+            gray[i * 4 + 3] = 255;
+        }
+        return compressor.compress(new Uint32Array(gray.buffer), w, h);
+    };
+
+    // --- re-render every sample (screenshot + opacity map) and upload ------
     const exportSamples = async () => {
         if (samples.length === 0) {
             setStatus('no poses recorded');
             return;
+        }
+        if (!compressor) {
+            compressor = new PngCompressor();
         }
 
         // session id = folder creation timestamp (local time), YYYYMMDD_HHMMSS
@@ -214,9 +255,32 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
                 prev = s.world;
             }
         }
-
-        const frames = kept.map(s => ({ transform_matrix: toOpenGlC2W(s.world) }));
         const removed = samples.length - kept.length;
+
+        const frames: { transform_matrix: number[][] }[] = [];
+        for (let i = 0; i < kept.length; i++) {
+            const s = kept[i];
+            setStatus(`rendering ${i + 1}/${kept.length}`);
+
+            // drive the camera back to the sampled pose (damping 0 = snap)
+            camera.fov = s.fov;
+            const { position, target } = worldToPose(s.world);
+            camera.setPose(position, target, 0);
+
+            const rgba = await events.invoke('render.offscreen', width, height) as Uint8Array;
+            const imagePng = await compressor.compress(new Uint32Array(rgba.buffer), width, height);
+            const maskPng = await opacityPng(rgba, width, height);
+
+            const index = i + 1;
+            const name = `frame_${String(index).padStart(5, '0')}.png`;
+            const form = new FormData();
+            form.append('index', String(index));
+            form.append('image', new Blob([imagePng], { type: 'image/png' }), name);
+            form.append('opacity', new Blob([maskPng], { type: 'image/png' }), name);
+            await fetch(`${backend}/api/recordings/${session}/frame`, { method: 'POST', body: form });
+
+            frames.push({ transform_matrix: toOpenGlC2W(s.world) });
+        }
 
         const transforms = { ...intrinsics(kept[0].fov), frames };
         setStatus('saving transforms.json');
@@ -227,7 +291,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         });
 
         const dupNote = dedupe ? ` (removed ${removed} duplicate)` : '';
-        setStatus(`saved ${frames.length} poses${dupNote} → output/${session}`);
+        setStatus(`saved ${frames.length} frames${dupNote} → output/${session}`);
     };
 
     // --- playback ----------------------------------------------------------
