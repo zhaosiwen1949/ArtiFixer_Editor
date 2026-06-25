@@ -18,8 +18,9 @@
  */
 
 import { chromium } from 'playwright';
-import { mkdirSync, writeFileSync, existsSync, copyFileSync, readdirSync } from 'node:fs';
-import { dirname, resolve, basename } from 'node:path';
+import http from 'node:http';
+import { mkdirSync, writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, resolve, basename, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,15 +30,22 @@ const DEFAULT_URL =
 
 // --- args ------------------------------------------------------------------
 const argv = process.argv.slice(2);
-const url = argv.find(a => !a.startsWith('--')) ?? DEFAULT_URL;
+const VALUE_FLAGS = new Set(['out', 'timeout', 'format']); // flags that consume the next arg
 const getOpt = (name, def) => {
     const i = argv.indexOf(`--${name}`);
     return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : def;
 };
+const url = argv.find((a, i) =>
+    !a.startsWith('--') && !(i > 0 && argv[i - 1].startsWith('--') && VALUE_FLAGS.has(argv[i - 1].slice(2)))
+) ?? DEFAULT_URL;
 const outDir = resolve(__dirname, getOpt('out', '../../data/model/exported'));
 const texDir = resolve(__dirname, '../../data/model/materials');
 const headed = argv.includes('--headed');
 const timeout = parseInt(getOpt('timeout', '120000'), 10);
+// --format: comma list of obj|glb|gltf|all (default obj). glb = single self-
+// contained binary file with textures embedded; gltf = JSON with embedded data URIs.
+let formats = getOpt('format', 'obj').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+if (formats.includes('all')) formats = ['obj', 'glb', 'gltf'];
 
 // --- the in-page extraction (runs in the browser) --------------------------
 // Returns { meshes: [{ name, matrixWorld:[16], position:[...], uv:[...]|null,
@@ -223,6 +231,99 @@ function buildObjMtl(meshes, texFiles) {
     return { obj: obj.join('\n') + '\n', mtl: mtl.join('\n') + '\n' };
 }
 
+// --- glTF/GLB export (rebuild geometry in-page, use THREE's GLTFExporter) ---
+// Runs in the already-open browser: serve the output dir (for texture JPGs),
+// open a page with a three.js importmap, rebuild the meshes as THREE objects and
+// export. GLB (binary:true) embeds the textures -> one self-contained file.
+const EXPORT_HTML = `<!doctype html><html><head><meta charset=utf8>
+<script type="importmap">{"imports":{
+ "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+ "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+</head><body></body></html>`;
+
+function pageBuildGltf({ meshes, texFiles, port, binary }) {
+    return (async () => {
+        const THREE = await import('three');
+        const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
+        const scene = new THREE.Scene();
+
+        // load the texture atlases (materialIndex i -> texFiles[i])
+        const loader = new THREE.TextureLoader();
+        const materials = await Promise.all(texFiles.map(async (f) => {
+            const mat = new THREE.MeshStandardMaterial({ roughness: 1, metalness: 0 });
+            try {
+                const t = await loader.loadAsync(`http://localhost:${port}/materials/${f}`);
+                t.colorSpace = THREE.SRGBColorSpace; // flipY stays default(true) -> matches OBJ/preview
+                mat.map = t;
+            } catch { /* leave untextured */ }
+            return mat;
+        }));
+        const fallback = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 1 });
+
+        for (const m of meshes) {
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.Float32BufferAttribute(m.position, 3));
+            if (m.uv) g.setAttribute('uv', new THREE.Float32BufferAttribute(m.uv, 2));
+            if (m.normal) g.setAttribute('normal', new THREE.Float32BufferAttribute(m.normal, 3));
+            if (m.index) g.setIndex(m.index);
+            if (!m.normal) g.computeVertexNormals();
+            let material;
+            if (m.groups && m.groups.length) {
+                for (const gr of m.groups) g.addGroup(gr.start, gr.count, gr.materialIndex);
+                material = materials.length ? materials : fallback;
+            } else {
+                material = materials[0] ?? fallback;
+            }
+            const mesh = new THREE.Mesh(g, material);
+            mesh.name = m.name;
+            mesh.matrixAutoUpdate = false;
+            mesh.matrix.fromArray(m.matrixWorld); // preserve viewer-world placement
+            scene.add(mesh);
+        }
+
+        const exporter = new GLTFExporter();
+        const result = await exporter.parseAsync(scene, { binary, onlyVisible: false });
+        if (binary) {
+            const buf = new Uint8Array(result);
+            let b = '';
+            const CH = 0x8000;
+            for (let i = 0; i < buf.length; i += CH) b += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+            return { binary: true, b64: btoa(b) };
+        }
+        return { binary: false, json: JSON.stringify(result) };
+    })();
+}
+
+async function exportGltf(browser, dir, meshes, texFiles, binary) {
+    const MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.html': 'text/html' };
+    const server = http.createServer((req, res) => {
+        if (req.url === '/' || req.url.startsWith('/__export')) {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            return res.end(EXPORT_HTML);
+        }
+        const p = resolve(dir, '.' + decodeURIComponent(req.url.split('?')[0]));
+        if (!existsSync(p)) { res.writeHead(404); return res.end('nf'); }
+        res.writeHead(200, { 'Content-Type': MIME[extname(p)] ?? 'application/octet-stream', 'Access-Control-Allow-Origin': '*' });
+        res.end(readFileSync(p));
+    });
+    await new Promise(r => server.listen(0, r));
+    const port = server.address().port;
+    try {
+        const page = await browser.newPage();
+        await page.goto(`http://localhost:${port}/__export.html`, { waitUntil: 'load' });
+        const out = await page.evaluate(pageBuildGltf, { meshes, texFiles, port, binary });
+        await page.close();
+        if (out.binary) {
+            writeFileSync(resolve(dir, 'model.glb'), Buffer.from(out.b64, 'base64'));
+            return 'model.glb';
+        }
+        writeFileSync(resolve(dir, 'model.gltf'), out.json);
+        return 'model.gltf';
+    } finally {
+        server.close();
+    }
+}
+
 // --- main ------------------------------------------------------------------
 (async () => {
     mkdirSync(outDir, { recursive: true });
@@ -288,22 +389,42 @@ function buildObjMtl(meshes, texFiles) {
     }
     console.log(`Texture files (materialIndex order): ${JSON.stringify(texFiles)}`);
 
-    // export only real textured meshes (drop bounding-box / gizmo helpers)
-    let exportMeshes = result.meshes.filter(m => m.diag && m.diag.some(d => d && d.hasMap));
-    if (exportMeshes.length === 0) {  // fallback: keep the largest mesh
+    // Keep only the real building model. Realsee names its model meshes
+    // "model_*"; everything else is a helper (bounding box, "mesh_1" gizmo) or a
+    // UI widget (entry-door markers "Step0x"/"Door", textured from a different
+    // CDN). Fall back to large textured meshes, then to the single largest mesh.
+    let exportMeshes = result.meshes.filter(m =>
+        /^model/i.test(m.name) ||
+        (m.diag && m.diag.some(d => d && d.hasMap) && m.position.length / 3 > 1000));
+    if (exportMeshes.length === 0) {
         exportMeshes = [result.meshes.reduce((a, b) => (b.position.length > a.position.length ? b : a))];
     }
-    console.log(`Exporting ${exportMeshes.length} of ${result.meshes.length} meshes (textured).`);
+    console.log(`Exporting ${exportMeshes.length} of ${result.meshes.length} meshes: ` +
+        exportMeshes.map(m => `${m.name}(${m.position.length / 3}v)`).join(', '));
 
-    const { obj, mtl } = buildObjMtl(exportMeshes, texFiles);
-    writeFileSync(resolve(outDir, 'model.obj'), obj);
-    writeFileSync(resolve(outDir, 'model.mtl'), mtl);
+    console.log(`Formats: ${formats.join(', ')}`);
+    const written = [];
+    if (formats.includes('obj')) {
+        const { obj, mtl } = buildObjMtl(exportMeshes, texFiles);
+        writeFileSync(resolve(outDir, 'model.obj'), obj);
+        writeFileSync(resolve(outDir, 'model.mtl'), mtl);
+        written.push('model.obj', 'model.mtl');
+    }
+    if (formats.includes('glb')) {
+        console.log('Exporting GLB (textures embedded)…');
+        written.push(await exportGltf(browser, outDir, exportMeshes, texFiles, true));
+    }
+    if (formats.includes('gltf')) {
+        console.log('Exporting glTF (JSON + embedded data URIs)…');
+        written.push(await exportGltf(browser, outDir, exportMeshes, texFiles, false));
+    }
+
     writeFileSync(resolve(outDir, 'extract_raw.json'),
         JSON.stringify({
-            url, meshCount: result.meshes.length, totalVertices: totalV,
+            url, formats, meshCount: result.meshes.length, totalVertices: totalV,
             meshes: result.meshes.map(m => ({ name: m.name, nv: m.position.length / 3, textures: m.textures, diag: m.diag })),
         }, null, 2));
-    console.log(`Wrote ${resolve(outDir, 'model.obj')} (+ model.mtl, materials/)`);
+    console.log(`Wrote ${written.join(', ')} (+ materials/) -> ${outDir}`);
 
     await browser.close();
 })().catch(err => { console.error(err); process.exit(1); });

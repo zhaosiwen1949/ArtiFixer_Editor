@@ -70,7 +70,7 @@ output dirs point at the project's reference scene (`data/` is gitignored).
 | `fetch_realsee_panoramas.py` | Download cube-map panoramas (6 faces/point) + emit per-face pinhole `transforms.json` from embedded `observers` poses | `data/panoramas/{point_XX/, images/, transforms.json, observers_raw.json}` | [doc](tools/fetch_realsee_panoramas.md) |
 | `build_panoramas.py` | Stitch the cube faces into equirectangular panoramas + per-point spherical-camera extrinsics | `data/panoramas/{pano/, pano_camera.json}` | [doc](tools/build_panoramas.md) |
 | `fetch_realsee_model.py` | Download the textured 3D model: proprietary `.at3d` mesh + texture atlases + manifest | `data/model/{model/*.at3d, materials/, model.json}` | [doc](tools/fetch_realsee_model.md) |
-| `model-extractor/` (Node) | Load the work in headless Chromium, let `@realsee/five` decode the `.at3d`, export standard **OBJ+MTL** | `data/model/exported/{model.obj, model.mtl, materials/, preview.png}` | [README](tools/model-extractor/README.md) |
+| `model-extractor/` (Node) | Load the work in headless Chromium, let `@realsee/five` decode the `.at3d`, export standard **OBJ+MTL** or **GLB/glTF** (`--format obj\|glb\|gltf\|all`) | `data/model/exported/{model.obj+mtl, model.glb, model.gltf, materials/, preview*.png}` | [README](tools/model-extractor/README.md) |
 
 Pipelines (run in order):
 - **Panoramas + poses:** `fetch_realsee_panoramas.py` → `build_panoramas.py`.

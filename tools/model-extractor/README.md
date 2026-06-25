@@ -25,13 +25,22 @@ Also run the asset downloader first so the texture JPGs exist locally:
 
 ## Use
 
-    node extract.mjs                         # default work URL
-    node extract.mjs "<work-url>" --out <dir> [--headed] [--timeout 120000]
-    node render-preview.mjs                  # sanity render -> exported/preview.png
+    node extract.mjs                         # default work URL, OBJ
+    node extract.mjs --format glb            # single self-contained GLB (textures embedded)
+    node extract.mjs --format all            # obj + glb + gltf
+    node extract.mjs "<work-url>" --out <dir> [--format obj,glb] [--headed] [--timeout 120000]
+    node render-preview.mjs                   # sanity render of model.obj  -> exported/preview.png
+    node render-preview.mjs model.glb         # sanity render of model.glb  -> exported/preview_glb.png
 
-Output (default `data/model/exported/`):
-- `model.obj`, `model.mtl`, `materials/texture_*.jpg`, `preview.png`
-- `extract_raw.json` — mesh/material diagnostics
+`--format` is a comma list of `obj` | `glb` | `gltf` | `all` (default `obj`):
+- **obj** — `model.obj` + `model.mtl` + `materials/texture_*.jpg` (multi-file).
+- **glb** — `model.glb`, one self-contained binary, textures embedded. Best for
+  modern pipelines / web viewers. (Larger than the source JPEGs: `GLTFExporter`
+  re-encodes the texture atlases as PNG.)
+- **gltf** — `model.gltf`, JSON with embedded data URIs (also self-contained).
+
+Output (default `data/model/exported/`): the chosen model file(s), `materials/`,
+`preview*.png`, and `extract_raw.json` (mesh/material diagnostics).
 
 ## Notes / limits
 

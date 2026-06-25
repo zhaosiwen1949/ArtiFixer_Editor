@@ -12,8 +12,12 @@ import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dir = resolve(__dirname, process.argv[2] ?? '../../data/model/exported');
-const shot = resolve(dir, 'preview.png');
+const args = process.argv.slice(2);
+const fileArg = args.find(a => /\.(obj|glb|gltf)$/i.test(a)) ?? 'model.obj';
+const dirArg = args.find(a => !/\.(obj|glb|gltf)$/i.test(a)) ?? '../../data/model/exported';
+const dir = resolve(__dirname, dirArg);
+const isGltf = /\.(glb|gltf)$/i.test(fileArg);
+const shot = resolve(dir, `preview${isGltf ? '_glb' : ''}.png`);
 
 const MIME = { '.obj': 'text/plain', '.mtl': 'text/plain', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.html': 'text/html' };
 const server = http.createServer((req, res) => {
@@ -34,30 +38,36 @@ const html = `<!doctype html><html><head><meta charset=utf8>
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const FILE=${JSON.stringify(fileArg)}, IS_GLTF=${isGltf};
 const W=1400,H=900;
 const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
-renderer.setSize(W,H); document.body.appendChild(renderer.domElement);
+renderer.setSize(W,H); renderer.outputColorSpace=THREE.SRGBColorSpace; document.body.appendChild(renderer.domElement);
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0x202024);
 const camera=new THREE.PerspectiveCamera(45,W/H,0.01,1000);
 scene.add(new THREE.AmbientLight(0xffffff,1.4));
 const d=new THREE.DirectionalLight(0xffffff,1.0); d.position.set(1,2,1); scene.add(d);
 window.__done=false; window.__err=null;
-new MTLLoader().setPath('/').load('model.mtl',(mats)=>{
-  mats.preload();
-  const ol=new OBJLoader().setMaterials(mats).setPath('/');
-  ol.load('model.obj',(obj)=>{
-    scene.add(obj);
-    const box=new THREE.Box3().setFromObject(obj);
-    const c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3());
-    const r=Math.max(s.x,s.y,s.z);
-    // bird's-eye tilt similar to the reference screenshot
-    camera.position.set(c.x+r*0.05, c.y+r*1.5, c.z+r*1.1);
-    camera.lookAt(c);
-    renderer.render(scene,camera);
-    window.__info={center:[c.x,c.y,c.z],size:[s.x,s.y,s.z]};
-    window.__done=true;
-  },undefined,(e)=>{window.__err=String(e);window.__done=true;});
-},undefined,(e)=>{window.__err=String(e);window.__done=true;});
+const place=(obj)=>{
+  scene.add(obj);
+  const box=new THREE.Box3().setFromObject(obj);
+  const c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3());
+  const r=Math.max(s.x,s.y,s.z);
+  camera.position.set(c.x+r*0.05, c.y+r*1.5, c.z+r*1.1);
+  camera.lookAt(c);
+  renderer.render(scene,camera);
+  window.__info={center:[c.x,c.y,c.z],size:[s.x,s.y,s.z]};
+  window.__done=true;
+};
+const fail=(e)=>{window.__err=String(e);window.__done=true;};
+if(IS_GLTF){
+  new GLTFLoader().setPath('/').load(FILE,(g)=>place(g.scene),undefined,fail);
+}else{
+  new MTLLoader().setPath('/').load('model.mtl',(mats)=>{
+    mats.preload();
+    new OBJLoader().setMaterials(mats).setPath('/').load(FILE,place,undefined,fail);
+  },undefined,fail);
+}
 </script></body></html>`;
 
 const browser = await chromium.launch({ headless: true, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
