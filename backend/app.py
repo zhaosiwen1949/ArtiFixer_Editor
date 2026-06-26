@@ -92,19 +92,19 @@ async def upload_frame(
 ):
     """Receive one rendered frame for a recording session.
 
-    Saved as data/output/<session>/images/frame_NNNNN.png (1-based, 5 digits).
+    Saved as data/output/<session>/frames/frame_NNNNN.png (1-based, 5 digits).
     If an opacity map is included, it is saved alongside as
     data/output/<session>/opacity/frame_NNNNN.png.
     """
     _safe(session, "session")
     filename = f"frame_{index:05d}.png"
 
-    images_dir = OUTPUT_DIR / session / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-    with (images_dir / filename).open("wb") as f:
+    frames_dir = OUTPUT_DIR / session / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    with (frames_dir / filename).open("wb") as f:
         f.write(await image.read())
 
-    saved = {"image": f"images/{filename}"}
+    saved = {"image": f"frames/{filename}"}
     if opacity is not None:
         opacity_dir = OUTPUT_DIR / session / "opacity"
         opacity_dir.mkdir(parents=True, exist_ok=True)

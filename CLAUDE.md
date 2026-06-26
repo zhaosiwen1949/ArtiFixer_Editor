@@ -16,7 +16,7 @@ A tool to **view 3D Gaussian Splatting (3DGS) `.ply` scenes in the browser and r
 
 Real-time continuous recording. The user free-navigates the scene, clicks **Start** (or presses **Shift+R**), navigates, then **Stop** (**Shift+R** again toggles it off):
 - While recording, camera poses are sampled at a fixed rate (**default 30 fps**) — only poses are stored.
-- On **Stop**, each sampled pose is re-rendered offscreen at the configured resolution (**default 960×540**) and uploaded to the backend, then a `transforms.json` is written. Per pose, **two PNGs** are saved: the RGB screenshot under `images/frame_NNNNN.png` and a **grayscale opacity map** (the render's alpha channel = splat coverage) under `opacity/frame_NNNNN.png`. The PNGs are matched to frames by their `images/frame_NNNNN.png` ordering — `transforms.json` `frames[i]` carries only `transform_matrix` (no `file_path`/`mask_path`). The session folder is named with the local creation timestamp, `YYYYMMDD_HHMMSS`. The resolution also drives the intrinsics (`w`, `h`, `fl_x`, `fl_y`, `cx`, `cy`).
+- On **Stop**, each sampled pose is re-rendered offscreen at the configured resolution (**default 960×540**) and uploaded to the backend, then a `transforms.json` is written. Per pose, **two PNGs** are saved: the RGB screenshot under `frames/frame_NNNNN.png` and a **grayscale opacity map** (the render's alpha channel = splat coverage) under `opacity/frame_NNNNN.png`. The PNGs are matched to frames by their `frames/frame_NNNNN.png` ordering — `transforms.json` `frames[i]` carries only `transform_matrix` (no `file_path`/`mask_path`). The session folder is named with the local creation timestamp, `YYYYMMDD_HHMMSS`. The resolution also drives the intrinsics (`w`, `h`, `fl_x`, `fl_y`, `cx`, `cy`).
 
 ## Playback workflow
 
@@ -72,10 +72,12 @@ output dirs point at the project's reference scene (`data/` is gitignored).
 | `fetch_realsee_model.py` | Download the textured 3D model: proprietary `.at3d` mesh + texture atlases + manifest | `data/model/{model/*.at3d, materials/, model.json}` | [doc](tools/fetch_realsee_model.md) |
 | `model-extractor/` (Node) | Load the work in headless Chromium, let `@realsee/five` decode the `.at3d`, export standard **OBJ+MTL** or **GLB/glTF** (`--format obj\|glb\|gltf\|all`) | `data/model/exported/{model.obj+mtl, model.glb, model.gltf, materials/, preview*.png}` | [README](tools/model-extractor/README.md) |
 | `check_alignment.py` (+ `model-extractor/align-overlay.mjs`) | Verify the exported mesh and the panorama camera files share one frame (numeric verdict + camera-on-mesh overlay renders) | `data/model/exported/{align_top.png, align_birdseye.png}` | [doc](tools/check_alignment.md) |
+| `mesh_to_colmap_3dgs.py` | Surface-sample the mesh → 3DGS init asset + COLMAP sparse model (poses from `transforms.json`, C2W→W2C, occlusion-aware 2D↔3D, texture colours) | `data/colmap/{sparse/0/{cameras,images,points3D}.bin, init_3dgs.ply}` | [doc](tools/mesh_to_colmap_3dgs.md) |
 
 Pipelines (run in order):
 - **Panoramas + poses:** `fetch_realsee_panoramas.py` → `build_panoramas.py`.
 - **3D mesh:** `fetch_realsee_model.py` (raw `.at3d` + textures) → `model-extractor/` (decode `.at3d` to OBJ; binds `materialIndex i → texture_i.jpg`).
+- **3DGS init:** the extracted mesh + `transforms.json` poses → `mesh_to_colmap_3dgs.py` (sampled cloud → 3DGS `.ply` + COLMAP `cameras/images/points3D.bin`). Verify frames first with `check_alignment.py`.
 
 Convention notes that bite: Realsee's viewer shares the OpenGL/NeRF camera frame
 (no axis flip → `transform_matrix`); panorama `up` is **negated** for

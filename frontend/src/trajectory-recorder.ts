@@ -12,7 +12,7 @@ import { Splat } from './splat';
 // Recording: camera poses are sampled at a fixed rate during free navigation
 // (only poses are stored, so motion stays smooth). On stop, every sampled pose
 // is re-rendered offscreen at the configured resolution and uploaded to the
-// FastAPI backend as two PNGs per frame — the RGB screenshot (images/) and a
+// FastAPI backend as two PNGs per frame — the RGB screenshot (frames/) and a
 // grayscale opacity map built from the render's alpha channel (opacity/) —
 // together with a transforms.json that matches the reference OpenGL/NeRF C2W
 // format (see CLAUDE.md).
@@ -200,6 +200,25 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
         };
     };
 
+    // --- undo render.offscreen's vertical flip before compressing ----------
+    // render.offscreen returns rows top-to-bottom (origin top-left, for screen-
+    // space pixel addressing), but PngCompressor itself flips Y — it expects the
+    // GPU's native bottom-up framebuffer data and emits a top-down PNG. Feeding
+    // the already-top-down buffer straight in double-flips it, saving every frame
+    // upside-down. Flip the rows back to bottom-up so the compressor's flip lands
+    // the PNG upright.
+    const flipYInPlace = (rgba: Uint8Array, w: number, h: number) => {
+        const row = w * 4;
+        const tmp = new Uint8Array(row);
+        for (let y = 0; y < Math.floor(h / 2); y++) {
+            const top = y * row;
+            const bot = (h - 1 - y) * row;
+            tmp.set(rgba.subarray(top, top + row));
+            rgba.copyWithin(top, bot, bot + row);
+            rgba.set(tmp, bot);
+        }
+    };
+
     // --- build a grayscale opacity PNG from a render's alpha channel -------
     // The offscreen render returns RGBA over a transparent background, so the
     // alpha channel is exactly the splat coverage / opacity. Replicate alpha
@@ -268,6 +287,7 @@ const registerTrajectoryRecorderEvents = (scene: Scene, events: Events) => {
             camera.setPose(position, target, 0);
 
             const rgba = await events.invoke('render.offscreen', width, height) as Uint8Array;
+            flipYInPlace(rgba, width, height);
             const imagePng = await compressor.compress(new Uint32Array(rgba.buffer), width, height);
             const maskPng = await opacityPng(rgba, width, height);
 
