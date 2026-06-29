@@ -1,0 +1,21 @@
+{
+  "name": "mesh-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "three.js viewer for the decoded Realsee mesh (data/model/exported/model.glb) with the same camera-trajectory recorder/playback as the splat dev server in frontend/.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.160.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/three": "^0.160.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.4.0"
+  }
+}

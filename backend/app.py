@@ -36,12 +36,16 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 app = FastAPI(title="ArtiFixer 3DGS Trajectory Recorder")
 
-# Allow the Rollup dev server (localhost:3000) to call the API during dev.
+# Allow the dev servers to call the API during dev: the splat viewer's Rollup
+# server (frontend/, :3000) and the three.js mesh viewer's Vite server
+# (mesh-viewer/, :5173).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
