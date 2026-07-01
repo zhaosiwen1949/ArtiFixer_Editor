@@ -62,6 +62,9 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
     let width = 960;
     let height = 540;
     let dedupe = false;
+    // global scale applied to the opacity/coverage mask's foreground value
+    // (1.0 -> white 255). Settable in the UI; clamped to [0, 1].
+    let opacityScale = 1.0;
 
     // --- playback state ----------------------------------------------------
     let playing = false;
@@ -78,6 +81,7 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
     let toggleBtn: HTMLButtonElement;
     let fpsInput: HTMLInputElement;
     let resInput: HTMLInputElement;
+    let opacityInput: HTMLInputElement;
     let dedupeInput: HTMLInputElement;
     let sessionSelect: HTMLSelectElement;
     let refreshBtn: HTMLButtonElement;
@@ -98,6 +102,7 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
         toggleBtn.disabled = playing;
         fpsInput.disabled = recording;
         resInput.disabled = recording || playing;
+        opacityInput.disabled = recording || playing;
         dedupeInput.disabled = recording || playing;
         playBtn.textContent = playing ? '■ Stop' : '▶ Play';
         playBtn.style.background = playing ? '#c0392b' : '#27ae60';
@@ -239,7 +244,7 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
 
             const rgba = renderPose(s);
             const imagePng = await pixelsToPngBlob(rgba, width, height, 'rgb');
-            const maskPng = await pixelsToPngBlob(rgba, width, height, 'opacity');
+            const maskPng = await pixelsToPngBlob(rgba, width, height, 'opacity', opacityScale);
 
             const index = i + 1;
             const name = `frame_${String(index).padStart(5, '0')}.png`;
@@ -463,6 +468,22 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
             }
         });
         panel.appendChild(row('Resolution', resInput));
+
+        opacityInput = document.createElement('input');
+        opacityInput.type = 'number';
+        opacityInput.min = '0';
+        opacityInput.max = '1';
+        opacityInput.step = '0.05';
+        opacityInput.value = String(opacityScale);
+        opacityInput.title = 'Global scale for the opacity mask foreground (1.0 = white 255)';
+        opacityInput.addEventListener('change', () => {
+            const v = parseFloat(opacityInput.value);
+            if (Number.isFinite(v) && v >= 0 && v <= 1) {
+                opacityScale = v;
+            }
+            opacityInput.value = String(opacityScale);
+        });
+        panel.appendChild(row('Opacity scale', opacityInput));
 
         dedupeInput = document.createElement('input');
         dedupeInput.type = 'checkbox';

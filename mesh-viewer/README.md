@@ -13,9 +13,12 @@ FastAPI backend in the same `transforms.json` format, so they're interchangeable
 - **Record** a camera trajectory (Shift+R, or the panel button): poses are sampled at a
   fixed rate during navigation.
 - On **Stop**, every sampled pose is re-rendered offscreen at the configured resolution
-  and uploaded to the backend as **two PNGs** — the RGB screenshot (`frames/`) and a
-  **binary opacity/coverage mask** (`opacity/`, mesh = white, background = black) — plus
+  and uploaded to the backend as **two PNGs** — the RGB screenshot (`frames/`) and an
+  **opacity/coverage mask** (`opacity/`, mesh = foreground, background = black) — plus
   a `transforms.json`.
+- **Opacity scale** (panel field, default `1.0`, range `0–1`): a global multiplier on
+  the mask's foreground value, so `1.0` writes white `255` for covered pixels and e.g.
+  `0.5` writes `127`. The background stays `0`.
 - **Playback**: pick a saved session and replay the camera path over the mesh.
 
 The mesh and the panorama cameras share one metric, **Y-up, OpenGL/NeRF** frame (camera
@@ -75,7 +78,7 @@ Recordings land under `data/output/<session>/` (shared with the splat viewer):
 
 ```
 frames/frame_NNNNN.png    RGB screenshot (upright)
-opacity/frame_NNNNN.png   binary coverage mask (white mesh on black, upright)
+opacity/frame_NNNNN.png   coverage mask (mesh foreground on black, upright; foreground = 255 × opacity scale)
 transforms.json           intrinsics + per-frame transform_matrix (C2W, OpenGL/NeRF)
 ```
 

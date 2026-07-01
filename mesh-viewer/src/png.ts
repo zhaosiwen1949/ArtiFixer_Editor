@@ -21,14 +21,18 @@ const toBlob = (canvas: HTMLCanvasElement): Promise<Blob> =>
     });
 
 // src is bottom-up RGBA (width*height*4). mode 'rgb' keeps colour (+ the render's
-// alpha = transparent background); mode 'opacity' emits a binary grayscale coverage
-// mask (mesh-covered pixel -> 255, transparent background -> 0).
+// alpha = transparent background); mode 'opacity' emits a grayscale coverage mask
+// (mesh-covered pixel -> the foreground value, transparent background -> 0). The
+// foreground value is `round(255 * opacityScale)` clamped to [0,255], so the global
+// opacity scale (default 1.0 -> 255) lets callers dim the whole mask uniformly.
 const pixelsToPngBlob = async (
     src: Uint8Array,
     width: number,
     height: number,
-    mode: Mode
+    mode: Mode,
+    opacityScale = 1.0
 ): Promise<Blob> => {
+    const fg = Math.max(0, Math.min(255, Math.round(255 * opacityScale)));
     const out = new Uint8ClampedArray(width * height * 4);
     const row = width * 4;
     for (let y = 0; y < height; y++) {
@@ -38,7 +42,7 @@ const pixelsToPngBlob = async (
             out.set(src.subarray(srcOff, srcOff + row), dstOff);
         } else {
             for (let x = 0; x < width; x++) {
-                const a = src[srcOff + x * 4 + 3] > 0 ? 255 : 0;
+                const a = src[srcOff + x * 4 + 3] > 0 ? fg : 0;
                 const d = dstOff + x * 4;
                 out[d] = a;
                 out[d + 1] = a;
