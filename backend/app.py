@@ -12,9 +12,10 @@ Run (from the backend/ directory):
 
 import json
 import re
+import sys
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +28,14 @@ PROJECT_ROOT = BACKEND_DIR.parent
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_DIR = DATA_DIR / "output"
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+
+# The textured mesh surface-sampled for the COLMAP point cloud (see /colmap below).
+MESH_PATH = DATA_DIR / "model" / "exported" / "model.obj"
+
+# The mesh->COLMAP conversion core lives under tools/ (shared with the CLI tool
+# mesh_to_colmap_3dgs.py). It's imported lazily in the /colmap endpoint so the
+# server starts even if the heavy deps (trimesh/embreex/scipy) are absent.
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
 # Default scene served to the frontend.
 DEFAULT_SCENE = DATA_DIR / "export_last.ply"
@@ -171,6 +180,72 @@ def get_transforms(session: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"transforms not found: {session}")
     return FileResponse(path, media_type="application/json")
+
+
+# ---------------------------------------------------------------------------
+# COLMAP export
+# ---------------------------------------------------------------------------
+@app.post("/api/recordings/{session}/colmap")
+def export_colmap(session: str, num_points: int = Body(100000, embed=True)):
+    """Convert a saved trajectory into a COLMAP sparse model + a 3DGS init cloud.
+
+    Reads data/output/<session>/transforms.json (OpenGL/NeRF C2W poses +
+    intrinsics), surface-samples the textured mesh (data/model/exported/model.obj)
+    to `num_points`, and writes, under the session folder:
+        sparse/0/{cameras,images,points3D}.bin   (camera_model = SIMPLE_PINHOLE)
+        init_3dgs.ply
+
+    Image names are generated from frame order (`frames/frame_NNNNN.png`), matching
+    the recorded RGB screenshots. Visibility is occlusion-aware (embree). Runs
+    synchronously — a plain `def` endpoint so FastAPI executes it in a threadpool.
+    """
+    _safe(session, "session")
+    if num_points < 1:
+        raise HTTPException(status_code=400, detail="num_points must be >= 1")
+
+    session_dir = OUTPUT_DIR / session
+    tj_path = session_dir / "transforms.json"
+    if not tj_path.exists():
+        raise HTTPException(status_code=404, detail=f"transforms not found: {session}")
+    if not MESH_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"mesh not found: {MESH_PATH.name}")
+
+    tj = json.loads(tj_path.read_text(encoding="utf-8"))
+    frames = tj.get("frames", [])
+    if not frames:
+        raise HTTPException(status_code=400, detail="transforms.json has no frames")
+
+    fx, fy = tj["fl_x"], tj["fl_y"]
+    cx, cy, W, H = tj["cx"], tj["cy"], int(tj["w"]), int(tj["h"])
+    # Order-based image names, matching frames/frame_NNNNN.png on disk (1-based).
+    image_names = [f"frames/frame_{i + 1:05d}.png" for i in range(len(frames))]
+
+    try:
+        from mesh_to_colmap_core import convert_trajectory_to_colmap
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"COLMAP conversion deps unavailable ({e}); "
+                   f"install trimesh/embreex/scipy in the backend env",
+        )
+
+    try:
+        stats = convert_trajectory_to_colmap(
+            frames=frames,
+            intrinsics=(fx, fy, cx, cy, W, H),
+            image_names=image_names,
+            mesh_path=MESH_PATH,
+            out_dir=session_dir,
+            max_points=num_points,
+            camera_model="simple_pinhole",
+        )
+    except Exception as e:  # noqa: BLE001 — surface conversion failures to the UI
+        raise HTTPException(status_code=500, detail=f"conversion failed: {e}")
+
+    # Report output paths relative to the project root.
+    stats["sparse_dir"] = str(Path(stats["sparse_dir"]).relative_to(PROJECT_ROOT))
+    stats["ply"] = str(Path(stats["ply"]).relative_to(PROJECT_ROOT))
+    return stats
 
 
 # ---------------------------------------------------------------------------

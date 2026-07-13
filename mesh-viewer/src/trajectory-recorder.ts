@@ -65,6 +65,8 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
     // global scale applied to the opacity/coverage mask's foreground value
     // (1.0 -> white 255). Settable in the UI; clamped to [0, 1].
     let opacityScale = 1.0;
+    // surface-sample count for the COLMAP point cloud (settable in the UI).
+    let colmapPoints = 100000;
 
     // --- playback state ----------------------------------------------------
     let playing = false;
@@ -86,6 +88,9 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
     let sessionSelect: HTMLSelectElement;
     let refreshBtn: HTMLButtonElement;
     let playBtn: HTMLButtonElement;
+    let colmapPointsInput: HTMLInputElement;
+    let colmapBtn: HTMLButtonElement;
+    let colmapBusy = false;
 
     const setStatus = (text: string) => {
         if (statusEl) {
@@ -109,6 +114,8 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
         playBtn.disabled = recording;
         sessionSelect.disabled = recording || playing;
         refreshBtn.disabled = recording || playing;
+        colmapPointsInput.disabled = recording || playing || colmapBusy;
+        colmapBtn.disabled = recording || playing || colmapBusy;
     };
 
     // --- pose sampling -----------------------------------------------------
@@ -418,6 +425,48 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
         }
     });
 
+    // --- COLMAP export -----------------------------------------------------
+    // Ask the backend to turn the selected saved session into a COLMAP sparse
+    // model (sparse/0/{cameras,images,points3D}.bin) + init_3dgs.ply. The heavy
+    // work (mesh sampling, occlusion-aware visibility) runs in Python on the
+    // backend; this just triggers it and reports the result.
+    const exportColmap = async () => {
+        if (recording || playing || colmapBusy) {
+            return;
+        }
+        const session = sessionSelect.value;
+        if (!session) {
+            setStatus('no trajectory selected');
+            return;
+        }
+        colmapBusy = true;
+        updateUI();
+        setStatus(`converting ${session} → COLMAP (${colmapPoints} pts)…`);
+        try {
+            const res = await fetch(`${backend}/api/recordings/${session}/colmap`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ num_points: colmapPoints })
+            });
+            if (!res.ok) {
+                let detail = `${res.status}`;
+                try {
+                    detail = (await res.json()).detail ?? detail;
+                } catch { /* non-JSON error body */ }
+                setStatus(`COLMAP failed: ${detail}`);
+                return;
+            }
+            const s = await res.json();
+            setStatus(`COLMAP: ${s.n_points} pts, ${s.n_images} imgs, ` +
+                `${s.n_observations} obs → ${session}/sparse/0`);
+        } catch (e) {
+            setStatus('COLMAP request failed (backend running?)');
+        } finally {
+            colmapBusy = false;
+            updateUI();
+        }
+    };
+
     // --- floating UI panel -------------------------------------------------
     const buildUI = () => {
         const panel = document.createElement('div');
@@ -550,6 +599,40 @@ const registerTrajectoryRecorder = (viewer: Viewer) => {
         });
         pbRow.appendChild(playBtn);
         panel.appendChild(pbRow);
+
+        // --- COLMAP export section ---
+        const cmDivider = document.createElement('div');
+        cmDivider.style.cssText = 'border-top:1px solid #444;margin:10px 0 8px';
+        panel.appendChild(cmDivider);
+
+        const cmTitle = document.createElement('div');
+        cmTitle.textContent = 'COLMAP export';
+        cmTitle.style.cssText = 'font-weight:600;margin-bottom:6px';
+        panel.appendChild(cmTitle);
+
+        colmapPointsInput = document.createElement('input');
+        colmapPointsInput.type = 'number';
+        colmapPointsInput.min = '1';
+        colmapPointsInput.step = '10000';
+        colmapPointsInput.value = String(colmapPoints);
+        colmapPointsInput.title = 'Surface-sample count for the point cloud (points3D.bin)';
+        colmapPointsInput.addEventListener('change', () => {
+            const v = parseInt(colmapPointsInput.value, 10);
+            if (Number.isFinite(v) && v >= 1) {
+                colmapPoints = v;
+            }
+            colmapPointsInput.value = String(colmapPoints);
+        });
+        panel.appendChild(row('Points', colmapPointsInput));
+
+        colmapBtn = document.createElement('button');
+        colmapBtn.textContent = 'Export COLMAP';
+        colmapBtn.title = 'Convert the selected session → sparse/0/*.bin + init_3dgs.ply';
+        colmapBtn.style.cssText = 'width:100%;border:none;color:#fff;background:#8e44ad;padding:6px;border-radius:4px;cursor:pointer';
+        colmapBtn.addEventListener('click', () => {
+            exportColmap();
+        });
+        panel.appendChild(colmapBtn);
 
         statusEl = document.createElement('div');
         statusEl.style.cssText = 'margin-top:8px;opacity:0.8;min-height:16px';

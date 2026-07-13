@@ -20,6 +20,8 @@ FastAPI backend in the same `transforms.json` format, so they're interchangeable
   the mask's foreground value, so `1.0` writes white `255` for covered pixels and e.g.
   `0.5` writes `127`. The background stays `0`.
 - **Playback**: pick a saved session and replay the camera path over the mesh.
+- **COLMAP export**: turn the selected saved session into a COLMAP sparse model +
+  a 3DGS init cloud (see **COLMAP export** below).
 
 The mesh and the panorama cameras share one metric, **Y-up, OpenGL/NeRF** frame (camera
 looks −Z), and the mesh is loaded in its native world frame, so the exported
@@ -41,6 +43,37 @@ A top-left panel switches between two camera controllers (only one is active at 
 
 Switching **Orbit → after flying** re-seats the orbit pivot in front of the camera, so
 orbiting resumes around what you're looking at.
+
+## COLMAP export
+
+The recorder panel's **COLMAP export** section converts the **selected saved session**
+(the one chosen in the Playback dropdown) into a COLMAP sparse model, so a recording
+can seed a COLMAP / 3DGS training pipeline.
+
+- **Points** — how many points to surface-sample from the mesh for `points3D.bin`
+  (default `100000`).
+- **Export COLMAP** — POSTs to the backend, which does the Python-only heavy lifting
+  (mesh sampling with texture colours, pose conversion, occlusion-aware visibility via
+  embree) and writes, under `data/output/<session>/`:
+
+  ```
+  sparse/0/cameras.bin     1 shared SIMPLE_PINHOLE camera ([f, cx, cy])
+  sparse/0/images.bin      one image per frame: W2C extrinsics + 2D↔3D correspondences
+  sparse/0/points3D.bin    the sampled cloud: xyz + RGB + per-point tracks
+  init_3dgs.ply            3DGS asset (same point set), binary_little_endian
+  ```
+
+  Image `name`s are `frames/frame_NNNNN.png` (generated from frame order, matching the
+  recorded RGB files), so the COLMAP **image root** is the session folder. It runs
+  **synchronously** — the panel shows `converting…` then a summary; large sessions can
+  take a minute or two.
+
+The conversion reuses `tools/mesh_to_colmap_core.py` (shared with the standalone CLI
+`tools/mesh_to_colmap_3dgs.py`). The mesh sampled is `data/model/exported/model.obj`.
+Requires the backend's Python env to have `trimesh`, `embreex`, `scipy` (the repo's
+`artifixer` conda env does). `transform_matrix` is OpenGL/NeRF **C2W**; COLMAP stores
+OpenCV **W2C**, so poses are flipped by `diag(1,−1,−1)` and inverted — see
+`tools/mesh_to_colmap_3dgs.md`.
 
 ## Prerequisites
 
