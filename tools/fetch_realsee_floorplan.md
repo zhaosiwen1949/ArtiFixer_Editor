@@ -49,6 +49,13 @@ completion stage:
    surfaces*; solved per matched room by area bisection, median taken), and
    written to `rooms_extra.json` in **metres, in `room_layout.json`'s world
    x/z frame** — directly comparable/mergeable with the layout rooms.
+4. **Centerlines** — the wall-centerline polygon of **every** room (the 18
+   layout rooms + the recovered ones = one entry per SVG room path) is written
+   to `rooms_centerline.json`: the registered SVG polygons in the same world
+   x/z metre frame, with **no inset applied**. Each entry carries `source`
+   (`room_layout` = matched a layout room, `rooms_extra` = recovered room,
+   `room_layout_buffered` = layout room the SVG missed, approximated by
+   `buffer(+inset)` of its inner polygon).
 
 Result on the reference scene: recovers 卫生间A (4.77㎡ vs 4.9 on the PNG),
 衣帽间A (4.37 vs 4.4), 阳台C (1.4 vs 1.8 — curved bay balcony, arc
@@ -74,6 +81,7 @@ CLI flags: positional `url` (default reference scene), `--out` (default
 floorplan.json                        manifest (summary + URLs + local paths + checksums)
 room_layout.json                      structured per-room wall geometry (35 rooms)
 rooms_extra.json                      rooms recovered from the SVG (metres, world x/z)
+rooms_centerline.json                 wall-centerline polygons of ALL rooms (metres, world x/z, no inset)
 floorplan.svg                         captured room SVG (+ injected <text> room names)
 images/hierarchy_floor_plan_0.png     detailed rendered floor plan (matches the 户型图 tab)
 images/outline_floor_plan_0.png       radar-minimap outline (matches the 漫游 tab)
@@ -106,3 +114,8 @@ image entry carries in the page.
   `room_layout.json` rooms, already inset to inner surfaces — merge the two for
   the complete room set. Its `transform` records the fitted SVG(mm, y-down) →
   world affine plus `inset_m` and `fit_mean_iou`.
+- `rooms_centerline.json` is the *centerline* counterpart: one polygon per room
+  for the **complete** room set (layout + recovered), un-inset — centerline
+  areas run larger than the inner-surface ones by ~half a wall thickness per
+  side (e.g. 卫生间A 5.66㎡ centerline vs 4.77㎡ inner). Same `transform` block
+  as `rooms_extra.json`.

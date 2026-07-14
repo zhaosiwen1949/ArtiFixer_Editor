@@ -40,6 +40,8 @@ overlays on top of it. An optional completion stage therefore:
      it, insets it by the calibrated half wall thickness (the SVG draws rooms
      to wall centerlines, room_layout to inner surfaces), and writes the
      recovered rooms to ``rooms_extra.json`` (metres, room_layout world x/z).
+     The wall-centerline polygons of **all** rooms (layout + recovered; the
+     registered SVG polygons, no inset) go to ``rooms_centerline.json``.
 
 The base scrape is stdlib-only; the completion stage additionally needs
 ``numpy``, ``shapely`` and ``playwright`` (+ its chromium) and is skipped with
@@ -465,12 +467,14 @@ def calibrate_inset(to_gt, svg_polys, gt_rooms, match, t_max=0.3):
 
 
 def recover_missing_rooms(svg_path: Path, layout_path: Path,
-                          out_dir: Path) -> tuple[dict, dict] | None:
+                          out_dir: Path) -> tuple[dict, dict, dict] | None:
     """Complete room_layout.json from the captured floor plan SVG.
 
     Writes ``out_dir/rooms_extra.json`` (metres, room_layout world x/z) and
-    returns (svg_manifest_record, rooms_extra_manifest_record), or ``None``
-    when the completion could not run."""
+    ``out_dir/rooms_centerline.json`` (the wall-**centerline** polygon of
+    every room — layout + recovered — same frame, no inset applied), and
+    returns (svg_record, rooms_extra_record, rooms_centerline_record), or
+    ``None`` when the completion could not run."""
     try:
         import numpy as np
         from shapely.geometry import Point, Polygon
@@ -516,10 +520,14 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
     inset = calibrate_inset(to_gt, svg_polys, gt_rooms, match)
     print(f"  calibrated inset {inset:.3f} m (half wall thickness)")
 
+    def poly_coords(p):
+        return [[round(x, 4), round(y, 4)] for x, y in p.exterior.coords[:-1]]
+
     # name leftover polygons by the room-name label falling inside them
     leftover_idx = [i for i in range(len(svg_polys))
                     if i not in set(match.values())]
     rooms = []
+    leftover_names = []
     for n, i in enumerate(leftover_idx):
         raw = Polygon(svg_polys[i]).buffer(0)
         inside = [t for x, y, t in labels if raw.contains(Point(x, y))]
@@ -528,15 +536,37 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
         if name.startswith("room_extra_"):
             print(f"  ! unnamed leftover polygon (area "
                   f"{to_gt(svg_polys[i]).area:.1f} m2) -> {name}", file=sys.stderr)
+        leftover_names.append(name)
         poly = to_gt(svg_polys[i]).buffer(-inset).simplify(0.005)
         rooms.append({
             "name": name,
             "area_m2": round(poly.area, 2),
-            "polygon": [[round(x, 4), round(y, 4)]
-                        for x, y in poly.exterior.coords[:-1]],
+            "polygon": poly_coords(poly),
         })
     print(f"  recovered {len(rooms)} room(s): "
           f"{', '.join(r['name'] for r in rooms) or '-'}")
+
+    # wall-centerline polygons of ALL rooms (layout + recovered): the SVG
+    # polygon transformed to world metres, with NO inset applied
+    def centerline_entry(name, source, svg_idx):
+        cp = to_gt(svg_polys[svg_idx]).simplify(0.005)
+        return {"name": name, "source": source,
+                "area_m2": round(cp.area, 2), "polygon": poly_coords(cp)}
+
+    centerline = [centerline_entry(n, "room_layout", i)
+                  for n, i in match.items()]
+    centerline += [centerline_entry(n, "rooms_extra", i)
+                   for n, i in zip(leftover_names, leftover_idx)]
+    # layout rooms the SVG match missed: approximate by outward inset buffer
+    for name, poly in gt_rooms.items():
+        if name in match:
+            continue
+        cp = poly.buffer(inset).simplify(0.005)
+        centerline.append({"name": name, "source": "room_layout_buffered",
+                           "area_m2": round(cp.area, 2),
+                           "polygon": poly_coords(cp)})
+        print(f"  ! {name} has no SVG match - centerline approximated by "
+              f"buffer(+{inset:.3f})", file=sys.stderr)
 
     extra = {
         "_comment": [
@@ -552,6 +582,23 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
     (out_dir / "rooms_extra.json").write_text(
         json.dumps(extra, indent=1, ensure_ascii=False))
 
+    center = {
+        "_comment": [
+            "全部房间（room_layout.json + rooms_extra.json）的墙体中线多边形（米制，room_layout 世界系 x/z）。",
+            "SVG 户型图按墙体中线绘制；本文件为配准后的 SVG 多边形原样输出（未做 inset 内缩）。",
+            "source: room_layout=与 room_layout.json 房间匹配的 SVG 多边形; rooms_extra=SVG 补全房间;",
+            "        room_layout_buffered=SVG 未匹配到、由内表面向外 buffer(+inset) 近似。",
+        ],
+        "source_svg": svg_path.name,
+        "transform": {"ax": ax, "bx": bx, "ay": ay, "by": by,
+                      "inset_m": round(inset, 4),
+                      "fit_mean_iou": round(mean_iou, 3)},
+        "rooms": centerline,
+    }
+    (out_dir / "rooms_centerline.json").write_text(
+        json.dumps(center, indent=1, ensure_ascii=False))
+    print(f"  centerlines: {len(centerline)} room(s) -> rooms_centerline.json")
+
     svg_record = {
         "local_path": str(svg_path.relative_to(out_dir))
         if svg_path.is_relative_to(out_dir) else str(svg_path),
@@ -563,7 +610,11 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
         "recovered": [r["name"] for r in rooms],
         "fit_mean_iou": round(mean_iou, 3),
     }
-    return svg_record, extra_record
+    centerline_record = {
+        "local_path": "rooms_centerline.json",
+        "room_count": len(centerline),
+    }
+    return svg_record, extra_record, centerline_record
 
 
 def main() -> None:
@@ -634,7 +685,7 @@ def main() -> None:
         }
 
     # 3. SVG room completion (recover rooms missing from room_layout.json).
-    svg_record = extra_record = None
+    svg_record = extra_record = centerline_record = None
     if not args.no_svg:
         print("SVG room completion...")
         layout_path = out_dir / "room_layout.json"
@@ -648,7 +699,7 @@ def main() -> None:
         else:
             result = recover_missing_rooms(svg_path, layout_path, out_dir)
             if result:
-                svg_record, extra_record = result
+                svg_record, extra_record, centerline_record = result
 
     # 4. Manifest.
     manifest = {
@@ -666,6 +717,7 @@ def main() -> None:
         },
         "svg": svg_record,                       # captured floor plan SVG
         "rooms_extra": extra_record,             # rooms recovered from the SVG
+        "rooms_centerline": centerline_record,   # centerline polygons, all rooms
     }
     (out_dir / "floorplan.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False))
