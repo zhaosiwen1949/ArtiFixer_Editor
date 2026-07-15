@@ -34,15 +34,20 @@ polygon (units mm, y down), with the room names as HTML overlays on top. The
 completion stage:
 
 1. **Capture** — headless Chromium (Playwright) opens the page, clicks the
-   户型图 tab, and dumps the `<svg>` holding the room polygons (chosen as the
-   SVG with the most `M/L/Z`-only paths). The overlay room names are mapped
-   into SVG user coordinates (`getScreenCTM().inverse()`) and baked into the
-   saved file as `<text>` elements → `floorplan.svg` is self-contained.
+   户型图 tab, and dumps the `<svg>` under `.floorplan-plugin__room-highlight`
+   — the floor plan layer with exactly one `<path>` per room (an error is
+   reported when the element is absent; there is no fallback). The overlay
+   room names are mapped into SVG user coordinates
+   (`getScreenCTM().inverse()`) and baked into the saved file as `<text>`
+   elements → `floorplan.svg` is self-contained.
 2. **Registration** — fits the SVG→world transform (per-axis scale + offset,
    y flipped) by greedily matching SVG polygons to the known
    `room_layout.json` rooms on centroid distance and least-squares refining
-   (algorithm from `svg_rooms_to_gt.py`). The mean fit IoU is reported
-   (~0.85 here); below 0.6 the stage aborts rather than emit garbage.
+   (algorithm from `svg_rooms_to_gt.py`). The seed pairs a largest SVG
+   polygon with a largest layout room; since the area ranking can differ
+   between the two sides, all top-3 × top-3 pairings are tried and the fit
+   matching the most rooms wins. The mean fit IoU is reported (~0.85 here);
+   below 0.6 the stage aborts rather than emit garbage.
 3. **Recovery** — each unmatched SVG polygon is named by the room-name
    `<text>` that falls inside it, inset by the calibrated half wall thickness
    (the SVG draws rooms to wall *centerlines*, `room_layout.json` to *inner
@@ -60,7 +65,8 @@ completion stage:
 Result on the reference scene: recovers 卫生间A (4.77㎡ vs 4.9 on the PNG),
 衣帽间A (4.37 vs 4.4), 阳台C (1.4 vs 1.8 — curved bay balcony, arc
 approximation). A polygon with no label inside is emitted as `room_extra_NN`
-with a warning.
+with a warning. Self-intersecting paths whose cleanup yields a MultiPolygon
+keep their largest part.
 
 ## Usage
 

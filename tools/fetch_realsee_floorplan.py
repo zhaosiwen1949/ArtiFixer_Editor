@@ -30,7 +30,9 @@ is one ``<path>`` polygon (units mm, y down), with the room names as HTML
 overlays on top of it. An optional completion stage therefore:
 
   1. captures that SVG with headless Chromium (Playwright): open the page,
-     click the 户型图 tab, dump the ``<svg>`` holding the room polygons, and
+     click the 户型图 tab, dump the ``<svg>`` under
+     ``.floorplan-plugin__room-highlight`` (the layer with exactly one path
+     per room; an error is reported when it is absent — no fallback), and
      bake the overlay room names into it as ``<text>`` elements (screen → SVG
      coords via ``getScreenCTM().inverse()``) → ``floorplan.svg``;
   2. fits the SVG→layout transform (per-axis scale + offset, y flipped) by
@@ -226,19 +228,17 @@ def _image_records(entries, kind: str, img_dir: Path, out_dir: Path) -> list[dic
 # --------------------------------------------------------------------------- #
 # SVG room completion (optional stage; needs playwright + numpy + shapely)
 # --------------------------------------------------------------------------- #
-# JS run in the page: find the floor plan <svg> (the one with the most
-# M/L/Z-only room paths), map every visible room-name overlay into its user
-# coordinate system, and return the SVG source + labels.
+# JS run in the page: grab the room-highlight <svg> (the floor plan layer with
+# exactly one <path> per room), map every visible room-name overlay into its
+# user coordinate system, and return the SVG source + labels.
 _JS_GRAB_SVG = """
 () => {
+    const best = document.querySelector('.floorplan-plugin__room-highlight svg');
+    if (!best) return null;
     const isRoomPath = d => d && /^[ML0-9,.eZ\\s-]+$/.test(d);
-    let best = null, bestN = 0;
-    for (const svg of document.querySelectorAll('svg')) {
-        const n = [...svg.querySelectorAll('path')]
-            .filter(p => isRoomPath(p.getAttribute('d'))).length;
-        if (n > bestN) { best = svg; bestN = n; }
-    }
-    if (!best || bestN < 5) return null;
+    const bestN = [...best.querySelectorAll('path')]
+        .filter(p => isRoomPath(p.getAttribute('d'))).length;
+    if (!bestN) return null;
     const inv = best.getScreenCTM().inverse();
     const box = best.getBoundingClientRect();
     const labels = [];
@@ -301,8 +301,8 @@ def capture_floorplan_svg(url: str, dest: Path) -> Path | None:
         return None
 
     if not grabbed:
-        print("! floor plan SVG not found on page - skipping completion",
-              file=sys.stderr)
+        print("! ERROR: no .floorplan-plugin__room-highlight SVG on page - "
+              "skipping completion", file=sys.stderr)
         return None
 
     svg = grabbed["svg"]
@@ -395,8 +395,12 @@ def load_layout_rooms(layout_path: Path) -> dict:
 def fit_transform(svg_polys, gt_rooms, n_iter=3):
     """Fit x_gt = ax*x + bx, z_gt = ay*y + by (y flip -> ay < 0).
 
-    Seeded from the largest room on both sides (unique enough in practice),
-    then alternate greedy centroid matching / least-squares refit.
+    A seed pairs one SVG polygon with one layout room (area ratio -> scale,
+    centroids -> offset). The area *ranking* is not reliable across the two
+    sides (SVG polygons run to wall centerlines), so every top-3 x top-3
+    largest pairing is tried; each trial alternates greedy 1:1 centroid
+    matching with a per-axis least-squares refit, and the converged fit
+    matching the most rooms (ties: smallest residual) wins.
     Returns (params (ax, bx, ay, by), {gt_name: svg_index})."""
     import numpy as np
     from shapely.geometry import Polygon
@@ -407,37 +411,53 @@ def fit_transform(svg_polys, gt_rooms, n_iter=3):
     gt_cent = np.asarray([gt_rooms[n].centroid.coords[0] for n in names])
     gt_area = np.asarray([gt_rooms[n].area for n in names])
 
-    i_svg = int(np.argmax(svg_area))
-    i_gt = int(np.argmax(gt_area))
-    s = float(np.sqrt(gt_area[i_gt] / svg_area[i_svg]))     # ~0.001 (mm->m)
-    ax, ay = s, -s                                          # SVG y is down
-    bx = gt_cent[i_gt, 0] - ax * svg_cent[i_svg, 0]
-    by = gt_cent[i_gt, 1] - ay * svg_cent[i_svg, 1]
+    def trial(i_svg, i_gt):
+        s = float(np.sqrt(gt_area[i_gt] / svg_area[i_svg]))  # ~0.001 (mm->m)
+        ax, ay = s, -s                                       # SVG y is down
+        bx = gt_cent[i_gt, 0] - ax * svg_cent[i_svg, 0]
+        by = gt_cent[i_gt, 1] - ay * svg_cent[i_svg, 1]
+        match = {}
+        for _ in range(n_iter):
+            # greedy 1:1 matching on transformed centroid distance
+            t_cent = np.stack([ax * svg_cent[:, 0] + bx,
+                               ay * svg_cent[:, 1] + by], axis=1)
+            dmat = np.linalg.norm(t_cent[:, None] - gt_cent[None], axis=2)
+            order = np.dstack(np.unravel_index(
+                np.argsort(dmat, axis=None), dmat.shape))[0]
+            used_s, used_g, match = set(), set(), {}
+            for i, j in order:
+                if dmat[i, j] > 1.5 or i in used_s or j in used_g:
+                    continue
+                used_s.add(i)
+                used_g.add(j)
+                match[names[j]] = int(i)
+            if len(match) < 2:      # not enough points for a refit
+                return None
+            # least-squares refit per axis on matched centroids
+            si = np.asarray([match[n] for n in match])
+            gi = np.asarray([names.index(n) for n in match])
+            Ax = np.stack([svg_cent[si, 0], np.ones(len(si))], axis=1)
+            Ay = np.stack([svg_cent[si, 1], np.ones(len(si))], axis=1)
+            (ax, bx), _, _, _ = np.linalg.lstsq(Ax, gt_cent[gi, 0], rcond=None)
+            (ay, by), _, _, _ = np.linalg.lstsq(Ay, gt_cent[gi, 1], rcond=None)
+        t_cent = np.stack([ax * svg_cent[si, 0] + bx,
+                           ay * svg_cent[si, 1] + by], axis=1)
+        resid = float(np.mean(np.linalg.norm(t_cent - gt_cent[gi], axis=1)))
+        return (float(ax), float(bx), float(ay), float(by)), match, resid
 
-    match = {}
-    for _ in range(n_iter):
-        # greedy 1:1 matching on transformed centroid distance
-        t_cent = np.stack([ax * svg_cent[:, 0] + bx,
-                           ay * svg_cent[:, 1] + by], axis=1)
-        dmat = np.linalg.norm(t_cent[:, None] - gt_cent[None], axis=2)
-        order = np.dstack(np.unravel_index(
-            np.argsort(dmat, axis=None), dmat.shape))[0]
-        used_s, used_g, match = set(), set(), {}
-        for i, j in order:
-            if dmat[i, j] > 1.5 or i in used_s or j in used_g:
+    best_key, best = None, None
+    for i_svg in np.argsort(svg_area)[::-1][:3]:
+        for i_gt in np.argsort(gt_area)[::-1][:3]:
+            r = trial(int(i_svg), int(i_gt))
+            if r is None:
                 continue
-            used_s.add(i)
-            used_g.add(j)
-            match[names[j]] = int(i)
-        # least-squares refit per axis on matched centroids
-        si = np.asarray([match[n] for n in match])
-        gi = np.asarray([names.index(n) for n in match])
-        Ax = np.stack([svg_cent[si, 0], np.ones(len(si))], axis=1)
-        Ay = np.stack([svg_cent[si, 1], np.ones(len(si))], axis=1)
-        (ax, bx), _, _, _ = np.linalg.lstsq(Ax, gt_cent[gi, 0], rcond=None)
-        (ay, by), _, _, _ = np.linalg.lstsq(Ay, gt_cent[gi, 1], rcond=None)
-
-    return (float(ax), float(bx), float(ay), float(by)), match
+            params, match, resid = r
+            key = (len(match), -resid)
+            if best_key is None or key > best_key:
+                best_key, best = key, (params, match)
+    if best is None:
+        return (1.0, 0.0, -1.0, 0.0), {}
+    return best
 
 
 def calibrate_inset(to_gt, svg_polys, gt_rooms, match, t_max=0.3):
@@ -520,6 +540,12 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
     inset = calibrate_inset(to_gt, svg_polys, gt_rooms, match)
     print(f"  calibrated inset {inset:.3f} m (half wall thickness)")
 
+    def largest_poly(p):
+        # buffer(0)/inset on a self-intersecting path can yield a MultiPolygon;
+        # keep the dominant part
+        return max(p.geoms, key=lambda g: g.area) \
+            if p.geom_type == "MultiPolygon" else p
+
     def poly_coords(p):
         return [[round(x, 4), round(y, 4)] for x, y in p.exterior.coords[:-1]]
 
@@ -527,7 +553,7 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
     leftover_idx = [i for i in range(len(svg_polys))
                     if i not in set(match.values())]
     rooms = []
-    leftover_names = []
+    kept = []      # (name, svg_index) of the leftovers
     for n, i in enumerate(leftover_idx):
         raw = Polygon(svg_polys[i]).buffer(0)
         inside = [t for x, y, t in labels if raw.contains(Point(x, y))]
@@ -536,8 +562,8 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
         if name.startswith("room_extra_"):
             print(f"  ! unnamed leftover polygon (area "
                   f"{to_gt(svg_polys[i]).area:.1f} m2) -> {name}", file=sys.stderr)
-        leftover_names.append(name)
-        poly = to_gt(svg_polys[i]).buffer(-inset).simplify(0.005)
+        poly = largest_poly(to_gt(svg_polys[i]).buffer(-inset)).simplify(0.005)
+        kept.append((name, i))
         rooms.append({
             "name": name,
             "area_m2": round(poly.area, 2),
@@ -549,19 +575,18 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
     # wall-centerline polygons of ALL rooms (layout + recovered): the SVG
     # polygon transformed to world metres, with NO inset applied
     def centerline_entry(name, source, svg_idx):
-        cp = to_gt(svg_polys[svg_idx]).simplify(0.005)
+        cp = largest_poly(to_gt(svg_polys[svg_idx])).simplify(0.005)
         return {"name": name, "source": source,
                 "area_m2": round(cp.area, 2), "polygon": poly_coords(cp)}
 
     centerline = [centerline_entry(n, "room_layout", i)
                   for n, i in match.items()]
-    centerline += [centerline_entry(n, "rooms_extra", i)
-                   for n, i in zip(leftover_names, leftover_idx)]
+    centerline += [centerline_entry(n, "rooms_extra", i) for n, i in kept]
     # layout rooms the SVG match missed: approximate by outward inset buffer
     for name, poly in gt_rooms.items():
         if name in match:
             continue
-        cp = poly.buffer(inset).simplify(0.005)
+        cp = largest_poly(poly.buffer(inset)).simplify(0.005)
         centerline.append({"name": name, "source": "room_layout_buffered",
                            "area_m2": round(cp.area, 2),
                            "polygon": poly_coords(cp)})
