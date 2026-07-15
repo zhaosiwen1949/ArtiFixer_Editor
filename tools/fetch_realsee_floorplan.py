@@ -45,10 +45,25 @@ overlays on top of it. An optional completion stage therefore:
      The wall-centerline polygons of **all** rooms (layout + recovered; the
      registered SVG polygons, no inset) go to ``rooms_centerline.json``.
 
-The base scrape is stdlib-only; the completion stage additionally needs
-``numpy``, ``shapely`` and ``playwright`` (+ its chromium) and is skipped with
-a warning when they are missing. ``--svg`` reuses a saved SVG (no browser),
-``--no-svg`` disables the stage entirely.
+Door/window recovery
+-------------------
+The 户型图 tab also carries a ``.floorplan-plugin__base-image`` SVG (the full
+line drawing), saved verbatim as ``floorplan_base.svg``. In it every door/window
+is a ``<use href="#lineItem-defs-N">`` of a reusable symbol from a fixed
+24-symbol library in the SVG ``<defs>`` (see ``LINEITEM_DEFS`` /
+``tools/docs/defs_gallery.html``). The recovery stage composes each symbol's
+transform chain, classifies it door/window/门洞 (defs-22 excluded), registers
+the base-image frame to the world frame by matching its ``type="area"`` rooms to
+``rooms_centerline.json``, and snaps each opening onto the nearest centerline
+edge -> ``doors_windows.json``. Scenes whose 户型图 is a raster image (no
+base-image SVG) are skipped (``room_layout.json`` ``lines[].children`` with
+``state:false`` still mark opening positions, without the door/window type).
+
+The base scrape is stdlib-only; the completion + door/window stages additionally
+need ``numpy``, ``shapely`` and ``playwright`` (+ its chromium) and are skipped
+with a warning when they are missing. ``--svg`` reuses a saved SVG (no browser),
+``--no-svg`` disables the stage entirely. Full docs:
+``tools/docs/fetch_realsee_floorplan.md``.
 
 Usage::
 
@@ -259,9 +274,23 @@ _JS_GRAB_SVG = """
 """
 
 
+# The base-image <svg> carries the line drawing (walls + door/window symbols).
+# Each door/window is a <use href="#lineItem-defs-N"> placed by an outer
+# transform; the <defs> hold N reusable symbol templates (see the door/window
+# recovery stage). Grabbed verbatim; positioned/decoded offline.
+_JS_GRAB_BASE_SVG = """
+() => {
+    const s = document.querySelector('.floorplan-plugin__base-image svg');
+    return s ? s.outerHTML : null;
+}
+"""
+
+
 def capture_floorplan_svg(url: str, dest: Path) -> Path | None:
     """Open ``url`` in headless Chromium, click the 户型图 tab and save the room
-    SVG (with the overlay room names injected as ``<text>``) to ``dest``.
+    SVG (with the overlay room names injected as ``<text>``) to ``dest``. Also
+    saves the base-image line-drawing SVG (walls + door/window symbols) to a
+    sibling ``floorplan_base.svg`` when present, for the door/window stage.
     Returns ``dest`` on success, ``None`` (with a warning) on any failure."""
     try:
         from playwright.sync_api import sync_playwright
@@ -280,7 +309,7 @@ def capture_floorplan_svg(url: str, dest: Path) -> Path | None:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
 
-            grabbed = None
+            grabbed = base_svg = None
             tab = page.get_by_text("户型图", exact=True)
             for i in range(max(tab.count(), 1)):
                 try:
@@ -290,7 +319,8 @@ def capture_floorplan_svg(url: str, dest: Path) -> Path | None:
                 # success criterion: a room SVG shows up
                 for _ in range(20):
                     page.wait_for_timeout(500)
-                    grabbed = page.evaluate(_JS_GRAB_SVG)
+                    grabbed = grabbed or page.evaluate(_JS_GRAB_SVG)
+                    base_svg = base_svg or page.evaluate(_JS_GRAB_BASE_SVG)
                     if grabbed:
                         break
                 if grabbed:
@@ -313,6 +343,14 @@ def capture_floorplan_svg(url: str, dest: Path) -> Path | None:
     dest.write_text(svg, encoding="utf-8")
     print(f"  ✓ {dest.name} ({grabbed['n_paths']} room paths, "
           f"{len(grabbed['labels'])} labels)")
+
+    base_dest = dest.with_name("floorplan_base.svg")
+    if base_svg:
+        base_dest.write_text(base_svg, encoding="utf-8")
+        print(f"  ✓ {base_dest.name} (base-image line drawing)")
+    else:
+        print("  · no .floorplan-plugin__base-image SVG "
+              "(door/window recovery unavailable)", file=sys.stderr)
     return dest
 
 
@@ -642,6 +680,332 @@ def recover_missing_rooms(svg_path: Path, layout_path: Path,
     return svg_record, extra_record, centerline_record
 
 
+# --------------------------------------------------------------------------- #
+# Door / window recovery from the base-image SVG (optional stage)
+# --------------------------------------------------------------------------- #
+# The base-image line drawing places each door/window as a <use> of a reusable
+# ``lineItem-defs-N`` symbol. Realsee ships a fixed 24-symbol library (doors,
+# windows, openings); a scene instantiates only the few it needs. The mapping
+# below (verified against rendered symbols + on-plan placement) classifies each
+# def index. defs-22 (暖气片/矮柜-like) is intentionally excluded — not an opening.
+LINEITEM_DEFS = {
+    0: ("door", "单开门"),        1: ("door", "推拉门"),
+    2: ("door", "双开门"),        3: ("door", "双开门"),
+    4: ("window", "窗(推拉)"),    5: ("window", "平窗"),
+    6: ("window", "弧形窗"),      7: ("window", "飘窗"),
+    8: ("window", "固定/落地窗"), 9: ("window", "飘窗"),
+    10: ("window", "飘窗"),       11: ("window", "飘窗"),
+    12: ("window", "窗"),         13: ("window", "凸窗"),
+    14: ("window", "弧形飘窗"),   15: ("window", "弧形飘窗"),
+    16: ("opening", "门洞/垭口"), 17: ("window", "窗"),
+    18: ("window", "固定窗"),     19: ("door", "折叠门"),
+    20: ("opening", "门洞"),      21: ("door", "组合门"),
+    22: ("ignore", "非门窗"),     23: ("door", "弹簧门"),
+}
+
+# JS-style SVG transform list -> 3x3 affine matrix.
+_TRANSFORM_RE = re.compile(r'(translate|rotate|scale|matrix)\s*\(([^)]*)\)')
+
+
+def _svg_transform(s):
+    import numpy as np
+    m = np.eye(3)
+    for name, arg in _TRANSFORM_RE.findall(s or ""):
+        v = [float(x) for x in re.split(r'[\s,]+', arg.strip()) if x]
+        if name == "translate":
+            t = np.array([[1, 0, v[0]], [0, 1, v[1] if len(v) > 1 else 0], [0, 0, 1]])
+        elif name == "scale":
+            sx = v[0]
+            sy = v[1] if len(v) > 1 else v[0]
+            t = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]])
+        elif name == "rotate":
+            a = np.radians(v[0])
+            c, si = np.cos(a), np.sin(a)
+            t = np.array([[c, -si, 0], [si, c, 0], [0, 0, 1]])
+            if len(v) == 3:
+                cx, cy = v[1], v[2]
+                t = (np.array([[1, 0, cx], [0, 1, cy], [0, 0, 1]]) @ t
+                     @ np.array([[1, 0, -cx], [0, 1, -cy], [0, 0, 1]]))
+        else:  # matrix(a b c d e f)
+            a, b, c, d, e, f = v
+            t = np.array([[a, c, e], [b, d, f], [0, 0, 1]])
+        m = m @ t
+    return m
+
+
+def _def_bboxes(root, ns):
+    """id -> (minx, miny, maxx, maxy) of every ``lineItem-defs-*`` symbol,
+    from the union of all coordinates in its geometry primitives."""
+    def coords(el):
+        pts = []
+        for e in el.iter():
+            tag, a = e.tag.split("}")[-1], e.attrib
+            if tag == "line":
+                pts += [(float(a["x1"]), float(a["y1"])),
+                        (float(a["x2"]), float(a["y2"]))]
+            elif tag == "rect":
+                x, y = float(a["x"]), float(a["y"])
+                pts += [(x, y), (x + float(a["width"]), y + float(a["height"]))]
+            elif tag == "circle":
+                cx, cy, r = float(a["cx"]), float(a["cy"]), float(a["r"])
+                pts += [(cx - r, cy - r), (cx + r, cy + r)]
+            elif tag in ("polyline", "polygon"):
+                n = [float(x) for x in re.split(r'[\s,]+', a["points"].strip()) if x]
+                pts += list(zip(n[::2], n[1::2]))
+            elif tag == "path":
+                n = [float(x) for x in re.findall(r'-?\d+\.?\d*(?:e-?\d+)?', a["d"])]
+                pts += list(zip(n[::2], n[1::2]))
+        return pts
+
+    out = {}
+    for g in root.iter(ns + "g"):
+        gid = g.get("id", "")
+        if gid.startswith("lineItem-defs-"):
+            pts = coords(g)
+            if pts:
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                out[gid] = (min(xs), min(ys), max(xs), max(ys))
+    return out
+
+
+def parse_base_symbols(svg_text: str) -> list[dict]:
+    """base-image SVG -> placed door/window symbols. Each: ``defn`` (def index)
+    and ``corners`` (its symbol bbox's 4 corners in base-image coordinates,
+    after composing the full transform chain down to the <use>)."""
+    from xml.etree import ElementTree as ET
+    import numpy as np
+
+    root = ET.fromstring(svg_text)
+    ns = "{http://www.w3.org/2000/svg}"
+    xlink = "{http://www.w3.org/1999/xlink}href"
+    bboxes = _def_bboxes(root, ns)
+    lig = next((g for g in root.iter(ns + "g")
+                if g.get("type") == "lineItemGroup"), None)
+    if lig is None:
+        return []
+
+    def path_to(node, target, acc):
+        acc = acc + [node]
+        if node is target:
+            return acc
+        for c in node:
+            r = path_to(c, target, acc)
+            if r:
+                return r
+        return None
+
+    symbols = []
+    for item in lig:
+        use = next((u for u in item.iter(ns + "use")), None)
+        if use is None:
+            continue
+        chain = path_to(item, use, [])
+        m = np.eye(3)
+        for node in chain:
+            m = m @ _svg_transform(node.get("transform", ""))
+        href = (use.get(xlink) or use.get("href", "")).lstrip("#")
+        bx = bboxes.get(href)
+        if not bx:
+            continue
+        minx, miny, maxx, maxy = bx
+        corners = []
+        for x, y in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)]:
+            p = m @ np.array([x, y, 1.0])
+            corners.append((float(p[0]), float(p[1])))
+        symbols.append({"defn": int(href.split("-")[-1]), "corners": corners})
+    return symbols
+
+
+def parse_base_areas(svg_text: str) -> list:
+    """base-image SVG -> room polygons (``type="area"`` paths, base coords)."""
+    import numpy as np
+    from xml.etree import ElementTree as ET
+
+    root = ET.fromstring(svg_text)
+    ns = "{http://www.w3.org/2000/svg}"
+    polys = []
+    for p in root.iter(ns + "path"):
+        if p.get("type") == "area":
+            n = [float(x) for x in re.findall(r'-?\d+\.?\d*(?:e-?\d+)?', p.get("d"))]
+            pts = list(zip(n[::2], n[1::2]))
+            if len(pts) >= 3:
+                polys.append(np.asarray(pts))
+    return polys
+
+
+def fit_base_to_world(base_polys, world_rooms, n_iter=4):
+    """Fit the base-image frame -> world metric frame (per-axis scale + offset)
+    by matching base ``type="area"`` room polygons to the (already world-frame)
+    centerline rooms. Multi-seed like :func:`fit_transform`, but the base y-axis
+    sign is unknown so both are tried. Returns (params, {base_idx: world_idx},
+    mean_iou), or ``None`` if nothing registers."""
+    import numpy as np
+    from shapely.geometry import Polygon
+
+    bpg = [Polygon(p).buffer(0) for p in base_polys]
+    barea = np.array([p.area for p in bpg])
+    bc = np.array([[p.centroid.x, p.centroid.y] for p in bpg])
+    wpg = [g for _, g in world_rooms]
+    warea = np.array([g.area for g in wpg])
+    wc = np.array([[g.centroid.x, g.centroid.y] for g in wpg])
+
+    def run(i_b, i_w, sy):
+        import math
+        s = math.sqrt(warea[i_w] / barea[i_b])
+        ax, ay = s, sy * s
+        bx = wc[i_w, 0] - ax * bc[i_b, 0]
+        by = wc[i_w, 1] - ay * bc[i_b, 1]
+        match = {}
+        for _ in range(n_iter):
+            tc = np.stack([ax * bc[:, 0] + bx, ay * bc[:, 1] + by], axis=1)
+            d = np.linalg.norm(tc[:, None] - wc[None], axis=2)
+            match, used = {}, set()
+            for bi, wi in np.dstack(np.unravel_index(
+                    np.argsort(d, axis=None), d.shape))[0]:
+                if d[bi, wi] > 1.5 or bi in match or wi in used:
+                    continue
+                match[int(bi)] = int(wi)
+                used.add(int(wi))
+            if len(match) < 2:
+                return None
+            bi = list(match)
+            wi = [match[k] for k in bi]
+            (ax, bx), _, _, _ = np.linalg.lstsq(
+                np.c_[bc[bi, 0], np.ones(len(bi))], wc[wi, 0], rcond=None)
+            (ay, by), _, _, _ = np.linalg.lstsq(
+                np.c_[bc[bi, 1], np.ones(len(bi))], wc[wi, 1], rcond=None)
+        tc = np.stack([ax * bc[list(match), 0] + bx,
+                       ay * bc[list(match), 1] + by], axis=1)
+        resid = float(np.mean(np.linalg.norm(
+            tc - wc[[match[k] for k in match]], axis=1)))
+        return (float(ax), float(bx), float(ay), float(by)), match, resid
+
+    best_key = best = None
+    for i_b in np.argsort(barea)[::-1][:3]:
+        for i_w in np.argsort(warea)[::-1][:3]:
+            for sy in (1.0, -1.0):
+                r = run(int(i_b), int(i_w), sy)
+                if not r:
+                    continue
+                params, match, resid = r
+                key = (len(match), -resid)
+                if best_key is None or key > best_key:
+                    best_key, best = key, (params, match)
+    if best is None:
+        return None
+    (ax, bx, ay, by), match = best
+    ious = []
+    for bi, wi in match.items():
+        tp = Polygon([(ax * x + bx, ay * y + by)
+                      for x, y in bpg[bi].exterior.coords]).buffer(0)
+        inter = tp.intersection(wpg[wi]).area
+        ious.append(inter / (tp.area + wpg[wi].area - inter + 1e-9))
+    return (ax, bx, ay, by), match, float(np.mean(ious)) if ious else 0.0
+
+
+def recover_doors_windows(base_svg_path: Path, centerline_path: Path,
+                          out_dir: Path) -> dict | None:
+    """Recover door/window positions from the base-image SVG and snap them onto
+    the ``rooms_centerline.json`` wall centerlines. Writes
+    ``out_dir/doors_windows.json`` and returns a manifest record, or ``None``."""
+    try:
+        import numpy as np  # noqa: F401
+        from shapely.geometry import LineString, Point, Polygon
+    except ImportError as exc:
+        print(f"! {exc.name} not installed - skipping door/window recovery",
+              file=sys.stderr)
+        return None
+
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="shapely")
+
+    svg_text = base_svg_path.read_text(encoding="utf-8")
+    symbols = parse_base_symbols(svg_text)
+    base_polys = parse_base_areas(svg_text)
+    center = json.loads(centerline_path.read_text(encoding="utf-8"))
+    world_rooms = [(r["name"], Polygon(r["polygon"]).buffer(0))
+                   for r in center["rooms"]]
+    print(f"  base symbols: {len(symbols)}, base rooms: {len(base_polys)}, "
+          f"centerline rooms: {len(world_rooms)}")
+    if not symbols or len(base_polys) < 2 or len(world_rooms) < 2:
+        print("! too little geometry - skipping door/window recovery",
+              file=sys.stderr)
+        return None
+
+    fit = fit_base_to_world(base_polys, world_rooms)
+    if fit is None:
+        print("! base-image registration failed - skipping", file=sys.stderr)
+        return None
+    (ax, bx, ay, by), match, mean_iou = fit
+    print(f"  base->world: x*{ax:.5f}{bx:+.3f}, y*{ay:.5f}{by:+.3f}  "
+          f"(matched {len(match)}/{len(base_polys)}, mean IoU {mean_iou:.3f})")
+    if mean_iou < 0.6:
+        print("! base-image fit IoU too low - not writing doors_windows.json",
+              file=sys.stderr)
+        return None
+
+    def tw(x, y):
+        return (ax * x + bx, ay * y + by)
+
+    # every centerline edge, tagged with its room
+    edges = []
+    for name, g in world_rooms:
+        cs = list(g.exterior.coords)
+        for i in range(len(cs) - 1):
+            edges.append((name, LineString([cs[i], cs[i + 1]])))
+
+    counts = {"door": 0, "window": 0, "opening": 0}
+    items = []
+    for s in symbols:
+        kind, sub = LINEITEM_DEFS.get(s["defn"], ("unknown", "?"))
+        if kind == "ignore":
+            continue
+        wc = [tw(x, y) for x, y in s["corners"]]
+        cx = sum(p[0] for p in wc) / 4
+        cy = sum(p[1] for p in wc) / 4
+        cp = Point(cx, cy)
+        name, edge = min(edges, key=lambda ne: ne[1].distance(cp))
+        (ex0, ey0), (ex1, ey1) = edge.coords[0], edge.coords[1]
+        dx, dy = ex1 - ex0, ey1 - ey0
+        L2 = dx * dx + dy * dy or 1e-9
+        ts = sorted(((px - ex0) * dx + (py - ey0) * dy) / L2 for px, py in wc)
+        t0, t1 = max(0.0, ts[0]), min(1.0, ts[-1])
+        seg = [(round(ex0 + t * dx, 4), round(ey0 + t * dy, 4)) for t in (t0, t1)]
+        width = ((seg[0][0] - seg[1][0]) ** 2 + (seg[0][1] - seg[1][1]) ** 2) ** .5
+        if kind in counts:
+            counts[kind] += 1
+        items.append({
+            "type": kind, "subtype": sub, "defs": s["defn"],
+            "room": name,
+            "edge": [[round(ex0, 4), round(ey0, 4)], [round(ex1, 4), round(ey1, 4)]],
+            "t": [round(t0, 4), round(t1, 4)],
+            "segment": [list(p) for p in seg],
+            "center": [round(cx, 4), round(cy, 4)],
+            "width_m": round(width, 3),
+            "edge_dist_m": round(edge.distance(cp), 3),
+        })
+
+    doc = {
+        "_comment": [
+            "从户型图 base-image SVG 恢复的门/窗/门洞，投影到 rooms_centerline.json 的墙体中线上（米制，room_layout 世界系 x/z）。",
+            "type: door=门, window=窗, opening=门洞/垭口; subtype 为符号细分; defs 为 Realsee lineItem 符号库索引（见 tools/docs/defs_gallery.html）。",
+            "每项归到最近的中线边 edge（该边所属房间为 room）；segment 为门窗在该边上占据的子线段，t 为其沿 edge 的归一化 [起,止] 参数；width_m 为洞口宽度。",
+            "defs-22 已排除（非门窗）。",
+        ],
+        "source_svg": base_svg_path.name,
+        "transform": {"ax": ax, "bx": bx, "ay": ay, "by": by,
+                      "fit_mean_iou": round(mean_iou, 3)},
+        "counts": counts,
+        "items": items,
+    }
+    (out_dir / "doors_windows.json").write_text(
+        json.dumps(doc, indent=1, ensure_ascii=False))
+    print(f"  doors/windows: {counts['door']} door, {counts['window']} window, "
+          f"{counts['opening']} opening -> doors_windows.json")
+    return {"local_path": "doors_windows.json", "counts": counts,
+            "fit_mean_iou": round(mean_iou, 3)}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -710,7 +1074,7 @@ def main() -> None:
         }
 
     # 3. SVG room completion (recover rooms missing from room_layout.json).
-    svg_record = extra_record = centerline_record = None
+    svg_record = extra_record = centerline_record = dw_record = None
     if not args.no_svg:
         print("SVG room completion...")
         layout_path = out_dir / "room_layout.json"
@@ -725,6 +1089,17 @@ def main() -> None:
             result = recover_missing_rooms(svg_path, layout_path, out_dir)
             if result:
                 svg_record, extra_record, centerline_record = result
+                # 3b. Door/window recovery from the base-image line drawing,
+                # snapped onto the centerlines just written.
+                base_svg = svg_path.with_name("floorplan_base.svg")
+                centerline_json = out_dir / "rooms_centerline.json"
+                if base_svg.exists() and centerline_json.exists():
+                    print("Door/window recovery...")
+                    dw_record = recover_doors_windows(
+                        base_svg, centerline_json, out_dir)
+                else:
+                    print("  · no floorplan_base.svg - skipping door/window "
+                          "recovery", file=sys.stderr)
 
     # 4. Manifest.
     manifest = {
@@ -743,6 +1118,7 @@ def main() -> None:
         "svg": svg_record,                       # captured floor plan SVG
         "rooms_extra": extra_record,             # rooms recovered from the SVG
         "rooms_centerline": centerline_record,   # centerline polygons, all rooms
+        "doors_windows": dw_record,              # door/window openings on centerlines
     }
     (out_dir / "floorplan.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False))

@@ -68,13 +68,13 @@ output dirs point at the project's reference scene (`data/` is gitignored).
 
 | Tool | Purpose | Key output | Details |
 |---|---|---|---|
-| `fetch_realsee_panoramas.py` | Download cube-map panoramas (6 faces/point) + emit per-face pinhole `transforms.json` from embedded `observers` poses | `data/panoramas/{point_XX/, images/, transforms.json, observers_raw.json}` | [doc](tools/fetch_realsee_panoramas.md) |
-| `build_panoramas.py` | Stitch the cube faces into equirectangular panoramas + per-point spherical-camera extrinsics | `data/panoramas/{pano/, pano_camera.json}` | [doc](tools/build_panoramas.md) |
-| `fetch_realsee_model.py` | Download the textured 3D model: proprietary `.at3d` mesh + texture atlases + manifest | `data/model/{model/*.at3d, materials/, model.json}` | [doc](tools/fetch_realsee_model.md) |
-| `fetch_realsee_floorplan.py` | Download the floor plan (户型图): structured `room_layout.json` (per-room names + 3D wall lines) + rendered floor plan / outline PNGs + `house_layout` summary. Also **completes missing rooms** from the page's inline floor-plan SVG (Playwright capture of room `<path>`s + overlay labels → affine fit to the layout frame → `rooms_extra.json`, metres, world x/z; needs numpy/shapely/playwright, else skipped), and emits the wall-**centerline** polygons of all rooms (layout + recovered, no inset) as `rooms_centerline.json` | `data/floorplan/{room_layout.json, rooms_extra.json, rooms_centerline.json, floorplan.svg, images/, floorplan.json}` | [doc](tools/fetch_realsee_floorplan.md) |
+| `fetch_realsee_panoramas.py` | Download cube-map panoramas (6 faces/point) + emit per-face pinhole `transforms.json` from embedded `observers` poses | `data/panoramas/{point_XX/, images/, transforms.json, observers_raw.json}` | [doc](tools/docs/fetch_realsee_panoramas.md) |
+| `build_panoramas.py` | Stitch the cube faces into equirectangular panoramas + per-point spherical-camera extrinsics | `data/panoramas/{pano/, pano_camera.json}` | [doc](tools/docs/build_panoramas.md) |
+| `fetch_realsee_model.py` | Download the textured 3D model: proprietary `.at3d` mesh + texture atlases + manifest | `data/model/{model/*.at3d, materials/, model.json}` | [doc](tools/docs/fetch_realsee_model.md) |
+| `fetch_realsee_floorplan.py` | Download the floor plan (户型图): structured `room_layout.json` (per-room names + 3D wall lines) + rendered floor plan / outline PNGs + `house_layout` summary. Also **completes missing rooms** from the page's inline floor-plan SVG (Playwright capture of room `<path>`s + overlay labels → affine fit to the layout frame → `rooms_extra.json`, metres, world x/z; needs numpy/shapely/playwright, else skipped), emits the wall-**centerline** polygons of all rooms (layout + recovered, no inset) as `rooms_centerline.json`, and **recovers door/window positions** from the base-image line drawing (`.floorplan-plugin__base-image` SVG → `floorplan_base.svg`; each opening is a `<use>` of a `lineItem-defs-N` symbol) — classified door/window/门洞, registered to the world frame, snapped onto the centerlines as `doors_windows.json` | `data/floorplan/{room_layout.json, rooms_extra.json, rooms_centerline.json, doors_windows.json, floorplan.svg, floorplan_base.svg, images/, floorplan.json}` | [doc](tools/docs/fetch_realsee_floorplan.md) |
 | `model-extractor/` (Node) | Load the work in headless Chromium, let `@realsee/five` decode the `.at3d`, export standard **OBJ+MTL** or **GLB/glTF** (`--format obj\|glb\|gltf\|all`) | `data/model/exported/{model.obj+mtl, model.glb, model.gltf, materials/, preview*.png}` | [README](tools/model-extractor/README.md) |
-| `check_alignment.py` (+ `model-extractor/align-overlay.mjs`) | Verify the exported mesh and the panorama camera files share one frame (numeric verdict + camera-on-mesh overlay renders) | `data/model/exported/{align_top.png, align_birdseye.png}` | [doc](tools/check_alignment.md) |
-| `mesh_to_colmap_3dgs.py` | Surface-sample the mesh → 3DGS init asset + COLMAP sparse model (poses from `transforms.json`, C2W→W2C, occlusion-aware 2D↔3D, texture colours). Thin CLI over `mesh_to_colmap_core.py` | `data/colmap/{sparse/0/{cameras,images,points3D}.bin, init_3dgs.ply}` | [doc](tools/mesh_to_colmap_3dgs.md) |
+| `check_alignment.py` (+ `model-extractor/align-overlay.mjs`) | Verify the exported mesh and the panorama camera files share one frame (numeric verdict + camera-on-mesh overlay renders) | `data/model/exported/{align_top.png, align_birdseye.png}` | [doc](tools/docs/check_alignment.md) |
+| `mesh_to_colmap_3dgs.py` | Surface-sample the mesh → 3DGS init asset + COLMAP sparse model (poses from `transforms.json`, C2W→W2C, occlusion-aware 2D↔3D, texture colours). Thin CLI over `mesh_to_colmap_core.py` | `data/colmap/{sparse/0/{cameras,images,points3D}.bin, init_3dgs.ply}` | [doc](tools/docs/mesh_to_colmap_3dgs.md) |
 | `mesh_to_colmap_core.py` | Shared conversion core (mesh sampling, C2W→W2C, occlusion visibility, COLMAP/PLY binary writers, `convert_trajectory_to_colmap()`) reused by the CLI **and** the backend's mesh-viewer COLMAP export. Supports `simple_pinhole`/`pinhole`/`opencv` | — (library) | — |
 
 Pipelines (run in order):
@@ -86,6 +86,31 @@ Convention notes that bite: Realsee's viewer shares the OpenGL/NeRF camera frame
 (no axis flip → `transform_matrix`); panorama `up` is **negated** for
 `transforms.json` (180° roll) but the equirect stitcher uses a separate upright
 `up = +Y` basis — see the per-tool docs before changing any face/quaternion math.
+
+Per-tool docs (one `.md` per script) live in **`tools/docs/`**.
+
+### Floor-plan door/window symbols (`lineItem-defs`)
+
+The 户型图 `base-image` SVG draws each door/window as `<use href="#lineItem-defs-N">`
+of a **fixed 24-symbol library** Realsee ships in the SVG's `<defs>`; a scene
+instantiates only the symbols it uses (the outer `<g transform="translate(cx,cy)
+rotate(θ)…">` positions each one). `fetch_realsee_floorplan.py`'s
+`LINEITEM_DEFS` classifies every index; a rendered gallery of all 24 (with the
+classification) is at **`tools/docs/defs_gallery.html`**. The mapping:
+
+| Category | defs indices | Notes |
+|---|---|---|
+| **door** 门 | 0 单开门, 1 推拉门, 2/3 双开门, 19 折叠门, 21 组合门, 23 弹簧门 | 0/16/... verified by on-plan placement; 0 = single swing (90° arc) |
+| **window** 窗 | 5 平窗, 7 飘窗(矩形凸窗), 6/14/15 弧形窗/飘窗, 9/10/11 矩形飘窗, 4/8/12/13/17/18 平窗/固定窗变体 | 5/7 verified |
+| **opening** 门洞/垭口 | 16, 20 | no leaf — just wall jambs; 16 verified |
+| **excluded** | 22 | 密集横线 (暖气片/矮柜-like) — **confirmed not a door/window**, ignored |
+
+Positions are recovered by registering the base-image frame (~25 mm/unit, a
+different frame from the `room-highlight` SVG's ~1 mm/unit) to the world metric
+frame via room-polygon matching, then projecting each symbol's footprint onto
+the nearest `rooms_centerline.json` edge → `doors_windows.json` (per opening:
+`type`, `subtype`, `defs`, `room`, the centerline `edge`, the occupied
+`segment` + normalized `t` range, and `width_m`).
 
 ## Dev setup
 

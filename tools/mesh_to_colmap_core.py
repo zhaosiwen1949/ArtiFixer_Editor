@@ -5,7 +5,7 @@ sparse model (+ a 3DGS init point cloud).
 This module holds the conversion math and the COLMAP/PLY binary writers so both
 the CLI tool (``mesh_to_colmap_3dgs.py``) and the FastAPI backend
 (``backend/app.py``, driven from the mesh-viewer web UI) share one source of
-truth. See ``mesh_to_colmap_3dgs.md`` for the full convention notes.
+truth. See ``docs/mesh_to_colmap_3dgs.md`` for the full convention notes.
 
 Convention (the part that bites): ``transform_matrix`` is OpenGL/NeRF
 camera-to-world (C2W) — Y-up, looks -Z. COLMAP ``images.bin`` stores OpenCV

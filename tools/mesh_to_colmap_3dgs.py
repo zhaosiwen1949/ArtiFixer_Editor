@@ -17,7 +17,7 @@ translation must equal the raw observer position = camera centre in world).
 
 The heavy lifting lives in ``mesh_to_colmap_core.py`` (shared with the FastAPI
 backend, which drives the same conversion from the mesh-viewer web UI). See
-tools/mesh_to_colmap_3dgs.md for the full convention notes.
+tools/docs/mesh_to_colmap_3dgs.md for the full convention notes.
 
 Deps: trimesh, embreex (occlusion rays), scipy (kNN scale), numpy, Pillow.
 
